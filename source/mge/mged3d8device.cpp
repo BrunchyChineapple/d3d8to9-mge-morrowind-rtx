@@ -22,6 +22,7 @@
 #include "mge/statusoverlay.h"
 #include "mge/userhud.h"
 #include "mge/videobackground.h"
+#include "support/log.h"
 
 static int sceneCount;
 static bool rendertargetNormal, isHUDready;
@@ -93,6 +94,19 @@ MGEProxyDevice::MGEProxyDevice(IDirect3DDevice9* real, Direct3D8* d3d, DWORD Beh
 
     // Store active device in distant land — use d3d8to9's ProxyInterface (the real D3D9 device)
     DistantLand::device = ProxyInterface;
+
+    // Cache the backbuffer D3D8 wrapper for render target comparison.
+    // We use the D3D8 wrapper pointer (not D3D9) because D3D9 GetBackBuffer
+    // can return different COM pointers each call (especially with Remix wrapping).
+    cachedBackBufferD3D8 = nullptr;
+    {
+        IDirect3DSurface8* bb8 = nullptr;
+        // GetBackBuffer on our d3d8to9 device returns a Direct3DSurface8 wrapper
+        if (SUCCEEDED(Direct3DDevice8::GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &bb8)) && bb8) {
+            cachedBackBufferD3D8 = bb8;
+            // Don't release — we hold a reference for the lifetime of the device
+        }
+    }
 
     // Patch splash screen minor issues
     D3DVIEWPORT9 vp;
@@ -201,13 +215,10 @@ HRESULT _stdcall MGEProxyDevice::Present(const RECT* a, const RECT* b, HWND c, c
 // Remember if MW is rendering to back buffer
 HRESULT _stdcall MGEProxyDevice::SetRenderTarget(IDirect3DSurface8* a, IDirect3DSurface8* b) {
     if (a) {
-        IDirect3DSurface9* back = nullptr;
-        auto hr = ProxyInterface->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back);
-        if (SUCCEEDED(hr)) {
-            auto ds = static_cast<Direct3DSurface8*>(a);
-            rendertargetNormal = (ds->GetProxyInterface() == back);
-            back->Release();
-        }
+        // Compare D3D8 wrapper pointers directly.
+        // This is reliable because d3d8to9's AddressLookupTable ensures the same
+        // Direct3DSurface8 wrapper is returned for the same underlying D3D9 surface.
+        rendertargetNormal = (cachedBackBufferD3D8 != nullptr && a == cachedBackBufferD3D8);
     }
 
     return Direct3DDevice8::SetRenderTarget(a, b);
@@ -262,6 +273,14 @@ HRESULT _stdcall MGEProxyDevice::BeginScene() {
 
 // EndScene
 HRESULT _stdcall MGEProxyDevice::EndScene() {
+    // Debug: log rendering state for first few frames after DL init
+    static int esLogCount = 0;
+    if (DistantLand::ready && esLogCount < 20) {
+        LOG::logline("EndScene: ready=%d rtNormal=%d sceneCount=%d stage0=%d isMainView=%d isFrameComplete=%d",
+            DistantLand::ready, rendertargetNormal, sceneCount, stage0Complete, isMainView, isFrameComplete);
+        esLogCount++;
+    }
+
     if (DistantLand::ready && rendertargetNormal) {
         if (sceneCount == 0) {
             if (!stage0Complete) {
@@ -432,6 +451,10 @@ ULONG _stdcall MGEProxyDevice::Release() {
     ULONG r = Direct3DDevice8::Release();
 
     if (r == 0) {
+        if (cachedBackBufferD3D8) {
+            cachedBackBufferD3D8->Release();
+            cachedBackBufferD3D8 = nullptr;
+        }
         DistantLand::release();
         MGEhud::release();
         StatusOverlay::release();
