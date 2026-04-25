@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{7EE21ADA-3B02-4CD6-A891-C2257A54B061}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <CharacterSet>NotSet</CharacterSet>
+    <PlatformToolset>v143</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup>
+    <TargetName>d3d8</TargetName>
+    <OutDir>bin\$(Configuration)\</OutDir>
+    <IntDir>intermediate\$(Configuration)\</IntDir>
+    <IncludePath>$(IncludePath);$(DXSDK_DIR)\Include</IncludePath>
+    <LibraryPath>$(DXSDK_DIR)\Lib\x86;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <!-- Debug configuration -->
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <SDLCheck />
+      <PreprocessorDefinitions>WIN32;NOMINMAX;_WINDOWS;_DEBUG;D3D_DEBUG_INFO;D3DX9;MGE_XE;MGE_RTX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>MGE-XE\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ModuleDefinitionFile>res\d3d8.def</ModuleDefinitionFile>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;d3d9.lib;d3dx9.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <ResourceCompile>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
+  <!-- Release configuration -->
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NOMINMAX;_WINDOWS;NDEBUG;D3D8TO9NOLOG;D3DX9;MGE_XE;MGE_RTX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <AdditionalIncludeDirectories>MGE-XE\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <ModuleDefinitionFile>res\d3d8.def</ModuleDefinitionFile>
+      <AdditionalDependencies>kernel32.lib;user32.lib;gdi32.lib;d3d9.lib;d3dx9.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <!-- Source files -->
+  <ItemGroup>
+    <!-- d3d8to9 core -->
+    <ClCompile Include="source\d3d8to9.cpp" />
+    <ClCompile Include="source\d3d8to9_base.cpp" />
+    <ClCompile Include="source\d3d8to9_device.cpp" />
+    <ClCompile Include="source\d3d8to9_index_buffer.cpp" />
+    <ClCompile Include="source\d3d8to9_surface.cpp" />
+    <ClCompile Include="source\d3d8to9_swap_chain.cpp" />
+    <ClCompile Include="source\d3d8to9_texture.cpp" />
+    <ClCompile Include="source\d3d8to9_vertex_buffer.cpp" />
+    <ClCompile Include="source\d3d8to9_volume.cpp" />
+    <ClCompile Include="source\d3d8types.cpp" />
+    <ClCompile Include="source\interface_query.cpp" />
+    <!-- MGEProxyDevice (our bridge) -->
+    <ClCompile Include="source\mge\mged3d8device.cpp" />
+    <!-- MGE-XE core -->
+    <ClCompile Include="MGE-XE\src\mge\api.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\configuration.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\distantinit.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\distantland.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\dlmath.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\ffeshader.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\macrofunctions.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\memorypool.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\mgedinput.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\morrowindbsa.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\mwbridge.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\mwinitpatch.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\postshaders.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\quadtree.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\renderdepth.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\renderexterior.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\rendergrass.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\rendershadow.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\renderwater.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\specificrender.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\statusoverlay.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\userhud.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\videobackground.cpp" />
+    <!-- MGE-XE MWSE bridge -->
+    <ClCompile Include="MGE-XE\src\mwse\funccamera.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\funcentity.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\funcgeneral.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\funcgmst.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\funchud.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\funcinput.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\funcmwui.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\funcphysics.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\funcshader.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\funcweather.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\mgebridge.cpp" />
+    <ClCompile Include="MGE-XE\src\mwse\mwseinstruction.cpp" />
+    <!-- MGE-XE IPC (new in UF 0.19.1) -->
+    <ClCompile Include="MGE-XE\src\ipc\bridge.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\client.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\dlshare.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\vec.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\vecbase.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\vecwrap.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\view.cpp" />
+    <!-- MGE-XE proxydx (minimal — just dinput8 and GUIDs) -->
+    <ClCompile Include="MGE-XE\src\proxydx\dinput8.cpp" />
+    <ClCompile Include="MGE-XE\src\proxydx\dxguid.cpp" />
+    <!-- MGE-XE support -->
+    <ClCompile Include="MGE-XE\src\support\log.cpp" />
+    <ClCompile Include="MGE-XE\src\support\pngsave.cpp" />
+    <ClCompile Include="MGE-XE\src\support\timing.cpp" />
+  </ItemGroup>
+  <!-- Header files -->
+  <ItemGroup>
+    <ClInclude Include="source\d3d8.hpp" />
+    <ClInclude Include="source\d3d8to9.hpp" />
+    <ClInclude Include="source\d3d8types.hpp" />
+    <ClInclude Include="source\d3dx9.hpp" />
+    <ClInclude Include="source\interface_query.hpp" />
+    <ClInclude Include="source\mge\mged3d8device.h" />
+    <ClInclude Include="res\resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="MGE-XE\src\proxydx\d3d8header.inl" />
+    <None Include="res\d3d8.def" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="res\d3d8to9.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
