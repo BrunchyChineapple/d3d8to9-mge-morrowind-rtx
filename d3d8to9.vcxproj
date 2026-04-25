@@ -116,6 +116,7 @@
     <ClCompile Include="MGE-XE\src\mge\quadtree.cpp" />
     <ClCompile Include="MGE-XE\src\mge\renderdepth.cpp" />
     <ClCompile Include="MGE-XE\src\mge\renderexterior.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\renderffp.cpp" />
     <ClCompile Include="MGE-XE\src\mge\rendergrass.cpp" />
     <ClCompile Include="MGE-XE\src\mge\rendershadow.cpp" />
     <ClCompile Include="MGE-XE\src\mge\renderwater.cpp" />
