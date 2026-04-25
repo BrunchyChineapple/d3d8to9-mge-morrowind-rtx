@@ -456,6 +456,13 @@ private:
 
 #include <fstream>
 
+// When MGE_XE is enabled, always disable d3d8to9's LOG to avoid conflict with MGE-XE's LOG namespace
+#ifdef MGE_XE
+#ifndef D3D8TO9NOLOG
+#define D3D8TO9NOLOG
+#endif
+#endif
+
 #ifndef D3D8TO9NOLOG
 extern std::ofstream LOG;
 #endif

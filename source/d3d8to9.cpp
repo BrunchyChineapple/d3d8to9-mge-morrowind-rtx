@@ -21,13 +21,20 @@ PFN_D3DXDisassembleShader D3DXDisassembleShader = nullptr;
 PFN_D3DXLoadSurfaceFromSurface D3DXLoadSurfaceFromSurface = nullptr;
 #endif // D3DX9
 
+// When MGE_XE is enabled, always disable d3d8to9's LOG to avoid conflict with MGE-XE's LOG namespace
+#ifdef MGE_XE
+#ifndef D3D8TO9NOLOG
+#define D3D8TO9NOLOG
+#endif
+#endif
+
 #ifndef D3D8TO9NOLOG
  // Very simple logging for the purpose of debugging only.
 std::ofstream LOG;
 #endif
 
 #ifdef MGE_XE
-extern void* CreateD3DWrapper(UINT);
+// CreateInputWrapper is defined in MGE-XE's mgedinput.cpp
 extern void* CreateInputWrapper(void*);
 
 static FARPROC getProc1(const char* lib, const char* funcname);

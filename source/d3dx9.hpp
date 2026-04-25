@@ -6,6 +6,29 @@
 
 #include <d3d9.h>
 
+#ifdef D3DX9
+// When D3DX9 is defined, use the real d3dx9 SDK headers and link to d3dx9.lib.
+// The D3DX functions (D3DXAssembleShader, D3DXDisassembleShader, D3DXLoadSurfaceFromSurface)
+// are declared in the SDK headers and resolved by the linker.
+#include <d3dx9.h>
+
+// d3d8to9 code uses these flags which are defined in the SDK headers already
+#ifndef D3DXASM_DEBUG
+#define D3DXASM_DEBUG 0x0001
+#endif
+#ifndef D3DXASM_SKIPVALIDATION
+#define D3DXASM_SKIPVALIDATION  0x0010
+#endif
+
+#ifdef NDEBUG
+#define D3DXASM_FLAGS  0
+#else
+#define D3DXASM_FLAGS D3DXASM_DEBUG
+#endif
+
+#else // !D3DX9
+// When D3DX9 is NOT defined, use function pointers loaded at runtime from d3dx9_43.dll
+
 #define D3DX_FILTER_NONE 1
 
 #define D3DXASM_DEBUG 0x0001
@@ -45,3 +68,5 @@ typedef HRESULT(WINAPI *PFN_D3DXLoadSurfaceFromSurface)(LPDIRECT3DSURFACE9 pDest
 extern PFN_D3DXAssembleShader D3DXAssembleShader;
 extern PFN_D3DXDisassembleShader D3DXDisassembleShader;
 extern PFN_D3DXLoadSurfaceFromSurface D3DXLoadSurfaceFromSurface;
+
+#endif // D3DX9

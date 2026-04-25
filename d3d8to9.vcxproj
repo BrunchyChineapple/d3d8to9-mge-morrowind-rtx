@@ -47,7 +47,7 @@
       <Optimization>Disabled</Optimization>
       <SDLCheck />
       <PreprocessorDefinitions>WIN32;NOMINMAX;_WINDOWS;_DEBUG;D3D_DEBUG_INFO;D3DX9;MGE_XE;MGE_RTX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>MGE-XE\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)source;MGE-XE\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
@@ -71,7 +71,7 @@
       <PreprocessorDefinitions>WIN32;NOMINMAX;_WINDOWS;NDEBUG;D3D8TO9NOLOG;D3DX9;MGE_XE;MGE_RTX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
-      <AdditionalIncludeDirectories>MGE-XE\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)source;MGE-XE\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
