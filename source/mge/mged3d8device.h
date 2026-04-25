@@ -6,7 +6,7 @@
 
 class MGEProxyDevice : public Direct3DDevice8 {
 public:
-    MGEProxyDevice(IDirect3DDevice9* real, Direct3D8* d3d, DWORD BehaviorFlags, BOOL EnableZBufferDiscarding);
+    MGEProxyDevice(IDirect3DDevice9* real, Direct3D8* d3d, BOOL EnableZBufferDiscarding);
     ULONG _stdcall Release(void);
 
     HRESULT _stdcall Present(const RECT* a, const RECT* b, HWND c, const RGNDATA* d);
@@ -25,10 +25,4 @@ public:
     HRESULT _stdcall SetVertexShader(DWORD a);
     HRESULT _stdcall SetStreamSource(UINT a, IDirect3DVertexBuffer8* b, UINT c);
     HRESULT _stdcall SetIndices(IDirect3DIndexBuffer8* a, UINT b);
-
-private:
-    // Cached backbuffer D3D8 wrapper for reliable render target comparison.
-    // D3D9 GetBackBuffer() can return different COM pointers each call,
-    // so we track the d3d8to9 wrapper object instead.
-    IDirect3DSurface8* cachedBackBufferD3D8 = nullptr;
 };

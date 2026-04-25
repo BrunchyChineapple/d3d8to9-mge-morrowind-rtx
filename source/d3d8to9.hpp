@@ -39,15 +39,14 @@ public:
 	virtual HMONITOR STDMETHODCALLTYPE GetAdapterMonitor(UINT Adapter) override;
 	virtual HRESULT STDMETHODCALLTYPE CreateDevice(UINT Adapter, D3DDEVTYPE DeviceType, HWND hFocusWindow, DWORD BehaviorFlags, D3DPRESENT_PARAMETERS8 *pPresentationParameters, IDirect3DDevice8 **ppReturnedDeviceInterface) override;
 
-	IDirect3DDevice8* factoryProxyDevice(IDirect3DDevice9* d, DWORD BehaviorFlags, BOOL EnableZBufferDiscarding);
+	IDirect3DDevice8* factoryProxyDevice(IDirect3DDevice9* d, bool EnableZBufferDiscarding);
 
 private:
 	IDirect3D9 *const ProxyInterface;
-
-	static constexpr UINT MAX_ADAPTERS = 8;
+	static const UINT MaxAdapters = 8;
 	UINT CurrentAdapterCount = 0;
-	UINT CurrentAdapterModeCount[MAX_ADAPTERS] = {};
-	std::vector<D3DDISPLAYMODE> CurrentAdapterModes[MAX_ADAPTERS];
+	UINT CurrentAdapterModeCount[MaxAdapters] = { 0 };
+	std::vector<D3DDISPLAYMODE> CurrentAdapterModes[MaxAdapters];
 };
 
 class Direct3DDevice8 : public IDirect3DDevice8
@@ -56,7 +55,7 @@ class Direct3DDevice8 : public IDirect3DDevice8
 	Direct3DDevice8 &operator=(const Direct3DDevice8 &) = delete;
 
 public:
-	Direct3DDevice8(Direct3D8 *d3d, IDirect3DDevice9 *ProxyInterface, DWORD BehaviorFlags, D3DFORMAT ZBufferFormat, BOOL EnableZBufferDiscarding);
+	Direct3DDevice8(Direct3D8 *d3d, IDirect3DDevice9 *ProxyInterface, DWORD BehaviorFlags, BOOL EnableZBufferDiscarding = FALSE);
 	~Direct3DDevice8();
 
 	IDirect3DDevice9 *GetProxyInterface() const { return ProxyInterface; }
@@ -162,32 +161,25 @@ public:
 
 	AddressLookupTable *ProxyAddressLookupTable;
 
-// MGE-XE: MGEProxyDevice needs access to these members
 public:
 	void ApplyClipPlanes();
 	void ReleaseShadersAndStateBlocks();
 
 	Direct3D8 *const D3D;
 	IDirect3DDevice9 *const ProxyInterface;
-
+	INT CurrentBaseVertexIndex = 0;
 	const BOOL ZBufferDiscarding = FALSE;
-	bool IsPaletteSupported = false;
-	bool IsMixedVertexProcessingDevice = false;
-	bool IsRecordingState = false;
-
-	DWORD CurrentZBufferBitCount = 0;
-	DWORD CurrentZBiasRenderState = 0;
-	INT   CurrentBaseVertexIndex = 0;
 	DWORD CurrentVertexShaderHandle = 0, CurrentPixelShaderHandle = 0;
-
-	// Cached render target for viewport validation and MGE-XE render target tracking
 	IDirect3DSurface9 *pCurrentRenderTarget = nullptr;
+	bool PaletteFlag = false;
+	bool IsRecordingState = false;
+	bool IsMixedVPModeDevice = false;
 
 	static constexpr size_t MAX_CLIP_PLANES = 6;
 	float StoredClipPlanes[MAX_CLIP_PLANES][4] = {};
 	DWORD ClipPlaneRenderState = 0;
 
-	// Store shader handles and state block tokens so they can be destroyed later to mirror D3D8 behavior
+	// Store Shader Handles and State Block Tokens so they can be destroyed later to mirror D3D8 behavior
 	std::unordered_set<DWORD> PixelShaderHandles, VertexShaderHandles, StateBlockTokens;
 	unsigned int VertexShaderAndDeclarationCount = 0;
 };
@@ -466,3 +458,6 @@ private:
 #ifndef D3D8TO9NOLOG
 extern std::ofstream LOG;
 #endif
+
+static const GUID guid_proxydx =
+{ 0x7c204fb1, 0x9cac, 0x4b8d, { 0xba, 0xed, 0x7b, 0xf4, 0x8b, 0xf6, 0x3b, 0xb2 } };

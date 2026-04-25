@@ -21,7 +21,7 @@ PFN_D3DXDisassembleShader D3DXDisassembleShader = nullptr;
 PFN_D3DXLoadSurfaceFromSurface D3DXLoadSurfaceFromSurface = nullptr;
 #endif // D3DX9
 
-// When MGE_XE is enabled, always disable d3d8to9's LOG to avoid conflict with MGE-XE's LOG namespace
+// When MGE_XE is enabled, always disable d3d8to9's LOG
 #ifdef MGE_XE
 #ifndef D3D8TO9NOLOG
 #define D3D8TO9NOLOG
@@ -35,6 +35,7 @@ std::ofstream LOG;
 
 #ifdef MGE_XE
 // CreateInputWrapper is defined in MGE-XE's mgedinput.cpp
+extern void* CreateInputWrapper(void*);
 extern void* CreateInputWrapper(void*);
 
 static FARPROC getProc1(const char* lib, const char* funcname);
@@ -65,8 +66,6 @@ extern "C" BOOL _stdcall DllMain(HANDLE hModule, DWORD reason, void* unused) {
 
 #ifdef MGE_RTX
         // Disable IPC shared memory when running with RTX Remix.
-        // Remix's D3D9 wrapper interferes with cross-process handle duplication
-        // needed by the 64-bit distant land server. Fall back to in-process path.
         if (Configuration.UseSharedMemory) {
             Configuration.UseSharedMemory = false;
             LOG::logline("RTX Remix mode: Shared memory disabled, using in-process distant land.");
@@ -159,6 +158,7 @@ void setDPIScalingAware() {
 }
 
 #endif // MGE_XE
+
 
 extern "C" HRESULT WINAPI ValidatePixelShader(const DWORD* pPixelShader, const D3DCAPS8* pCaps, BOOL ReturnErrors, char** pErrorsString)
 {
@@ -270,7 +270,7 @@ extern "C" HRESULT WINAPI ValidateVertexShader(const DWORD* pVertexShader, const
 extern "C" void WINAPI DebugSetMute()
 {
 #ifndef D3D8TO9NOLOG
-	LOG << "Redirecting '" << "DebugSetMute" << "(" << ")' ..." << std::endl;
+	LOG << "Redirecting '" << "DebugSetMute ()" << "'..." << std::endl;
 #endif
 }
 
@@ -333,3 +333,12 @@ extern "C" IDirect3D8 *WINAPI Direct3DCreate8(UINT SDKVersion)
 
 	return new Direct3D8(d3d);
 }
+
+//-----------------------------------------------------------------------------
+// Proxy methods
+//IDirect3DTexture8* Direct3DDevice8::factoryProxyTexture(IDirect3DTexture9* tex) {
+//    return new ProxyTexture(tex, this);
+//}
+//IDirect3DSurface8* Direct3DDevice8::factoryProxySurface(IDirect3DSurface9* surface) {
+//    return new ProxySurface(surface, this);
+//}

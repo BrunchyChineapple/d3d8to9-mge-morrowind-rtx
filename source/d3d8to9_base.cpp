@@ -4,27 +4,22 @@
  */
 
 #include "d3d8to9.hpp"
-#ifdef MGE_XE
 #include <mge/configuration.h>
-#include <algorithm>
-#endif // MGE_XE
 
 static const D3DFORMAT AdapterFormats[] = {
 	D3DFMT_A8R8G8B8,
 	D3DFMT_X8R8G8B8,
 	D3DFMT_R5G6B5,
 	D3DFMT_X1R5G5B5,
-	D3DFMT_A1R5G5B5
-};
+	D3DFMT_A1R5G5B5};
 
-Direct3D8::Direct3D8(IDirect3D9 *ProxyInterface) :
-	ProxyInterface(ProxyInterface)
+Direct3D8::Direct3D8(IDirect3D9 *ProxyInterface) : ProxyInterface(ProxyInterface)
 {
 	D3DDISPLAYMODE pMode;
 
 	CurrentAdapterCount = ProxyInterface->GetAdapterCount();
-	if (CurrentAdapterCount > MAX_ADAPTERS)
-		CurrentAdapterCount = MAX_ADAPTERS;
+	if (CurrentAdapterCount > MaxAdapters)
+		CurrentAdapterCount = MaxAdapters;
 
 	for (UINT Adapter = 0; Adapter < CurrentAdapterCount; Adapter++)
 	{
@@ -211,6 +206,7 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 		if (Configuration.VWait >= D3DPRESENT_INTERVAL_TWO && Configuration.VWait <= D3DPRESENT_INTERVAL_FOUR)
 		{
 			Configuration.VWait = D3DPRESENT_INTERVAL_ONE;
+			// LOG::logline("VWait greater than one is not supported in windowed mode.");
 		}
 	}
 
@@ -244,20 +240,27 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 	pp.AutoDepthStencilFormat = pPresentationParameters->AutoDepthStencilFormat;
 	pp.FullScreen_RefreshRateInHz = pPresentationParameters->FullScreen_RefreshRateInHz;
 	pp.PresentationInterval = pPresentationParameters->FullScreen_PresentationInterval;
+
 #endif // MGE_XE
 
 #ifndef D3D8TO9NOLOG
 	LOG << "Redirecting '" << "IDirect3D8::CreateDevice" << "(" << this << ", " << Adapter << ", " << DeviceType << ", " << hFocusWindow << ", " << BehaviorFlags << ", " << pPresentationParameters << ", " << ppReturnedDeviceInterface << ")' ..." << std::endl;
 #endif
 
+	// Create device in the same manner as the proxy
 	IDirect3DDevice9 *DeviceInterface = nullptr;
 
 	const HRESULT hr = ProxyInterface->CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, &pp, &DeviceInterface);
 	if (FAILED(hr))
 		return hr;
 
-	*ppReturnedDeviceInterface = factoryProxyDevice(DeviceInterface, BehaviorFlags, (pp.Flags & D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL) != 0);
+#ifdef MGE_XE
+	*ppReturnedDeviceInterface = factoryProxyDevice(DeviceInterface, (pp.Flags & D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL) != 0);
+#else
+	*ppReturnedDeviceInterface = new Direct3DDevice8(this, DeviceInterface, BehaviorFlags, (PresentParams.Flags & D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL) != 0);
+#endif // MGE_XE
 
+	///////////////////////////////////////
 #ifdef MGE_XE
 	// Set up default render states
 	Configuration.ScaleFilter = (Configuration.AnisoLevel > 0) ? D3DTEXF_ANISOTROPIC : D3DTEXF_LINEAR;
@@ -269,6 +272,7 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 		DeviceInterface->SetSamplerState(i, D3DSAMP_MAXANISOTROPY, Configuration.AnisoLevel);
 	}
 
+#ifndef MGE_FOG
 	// Set variables dependent on configuration
 	DWORD FogPixelMode, FogVertexMode, RangedFog;
 	if (Configuration.FogMode == 2)
@@ -293,8 +297,10 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 	DeviceInterface->SetRenderState(D3DRS_FOGVERTEXMODE, FogVertexMode);
 	DeviceInterface->SetRenderState(D3DRS_FOGTABLEMODE, FogPixelMode);
 	DeviceInterface->SetRenderState(D3DRS_RANGEFOGENABLE, RangedFog);
+#endif // MGE_FOG
 	DeviceInterface->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, (Configuration.AALevel > 0));
 #endif // MGE_XE
+	///////////////////////////////////////
 
 	// Set default vertex declaration
 	DeviceInterface->SetFVF(D3DFVF_XYZ);
@@ -306,11 +312,11 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 #include "mge/mged3d8device.h"
 #endif // MGE_XE
 
-IDirect3DDevice8 *Direct3D8::factoryProxyDevice(IDirect3DDevice9 *d, DWORD BehaviorFlags, BOOL EnableZBufferDiscarding)
+IDirect3DDevice8 *Direct3D8::factoryProxyDevice(IDirect3DDevice9 *d, bool EnableZBufferDiscarding)
 {
 #ifdef MGE_XE
-	return new MGEProxyDevice(d, this, BehaviorFlags, EnableZBufferDiscarding);
+	return new MGEProxyDevice(d, this, EnableZBufferDiscarding);
 #else
-	return new Direct3DDevice8(this, d, BehaviorFlags, D3DFMT_UNKNOWN, EnableZBufferDiscarding);
+	return new Direct3DDevice8(this, d, EnableZBufferDiscarding);
 #endif // MGE_XE
 }

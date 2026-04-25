@@ -50,8 +50,8 @@ static void captureMaterial(const D3DMATERIAL8* a);
 static float calcFPS();
 
 
-MGEProxyDevice::MGEProxyDevice(IDirect3DDevice9* real, Direct3D8* d3d, DWORD BehaviorFlags, BOOL EnableZBufferDiscarding)
-    : Direct3DDevice8(d3d, real, BehaviorFlags, D3DFMT_UNKNOWN, EnableZBufferDiscarding) {
+MGEProxyDevice::MGEProxyDevice(IDirect3DDevice9* real, Direct3D8* d3d, BOOL EnableZBufferDiscarding)
+    : Direct3DDevice8(d3d, real, 0, EnableZBufferDiscarding) {
     // Initialize state here, as the device is released and recreated on fullscreen Alt-Tab
     sceneCount = -1;
     rendertargetNormal = true;
@@ -94,19 +94,6 @@ MGEProxyDevice::MGEProxyDevice(IDirect3DDevice9* real, Direct3D8* d3d, DWORD Beh
 
     // Store active device in distant land — use d3d8to9's ProxyInterface (the real D3D9 device)
     DistantLand::device = ProxyInterface;
-
-    // Cache the backbuffer D3D8 wrapper for render target comparison.
-    // We use the D3D8 wrapper pointer (not D3D9) because D3D9 GetBackBuffer
-    // can return different COM pointers each call (especially with Remix wrapping).
-    cachedBackBufferD3D8 = nullptr;
-    {
-        IDirect3DSurface8* bb8 = nullptr;
-        // GetBackBuffer on our d3d8to9 device returns a Direct3DSurface8 wrapper
-        if (SUCCEEDED(Direct3DDevice8::GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &bb8)) && bb8) {
-            cachedBackBufferD3D8 = bb8;
-            // Don't release — we hold a reference for the lifetime of the device
-        }
-    }
 
     // Patch splash screen minor issues
     D3DVIEWPORT9 vp;
@@ -218,8 +205,13 @@ HRESULT _stdcall MGEProxyDevice::Present(const RECT* a, const RECT* b, HWND c, c
 // Remember if MW is rendering to back buffer
 HRESULT _stdcall MGEProxyDevice::SetRenderTarget(IDirect3DSurface8* a, IDirect3DSurface8* b) {
     if (a) {
-        // Compare D3D8 wrapper pointers directly.
-        rendertargetNormal = (cachedBackBufferD3D8 != nullptr && a == cachedBackBufferD3D8);
+        IDirect3DSurface9* back = nullptr;
+        auto hr = ProxyInterface->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back);
+        if (SUCCEEDED(hr)) {
+            auto ds = static_cast<Direct3DSurface8*>(a);
+            rendertargetNormal = (ds->GetProxyInterface() == back);
+            back->Release();
+        }
     }
 
     return Direct3DDevice8::SetRenderTarget(a, b);
@@ -444,10 +436,6 @@ ULONG _stdcall MGEProxyDevice::Release() {
     ULONG r = Direct3DDevice8::Release();
 
     if (r == 0) {
-        if (cachedBackBufferD3D8) {
-            cachedBackBufferD3D8->Release();
-            cachedBackBufferD3D8 = nullptr;
-        }
         DistantLand::release();
         MGEhud::release();
         StatusOverlay::release();
