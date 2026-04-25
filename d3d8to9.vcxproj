@@ -97,8 +97,8 @@
     <ClCompile Include="source\d3d8to9_volume.cpp" />
     <ClCompile Include="source\d3d8types.cpp" />
     <ClCompile Include="source\interface_query.cpp" />
-    <!-- MGEProxyDevice (our bridge) -->
-    <ClCompile Include="source\mge\mged3d8device.cpp" />
+    <!-- MGEProxyDevice (rfuzzo's bridge from MGE-XE submodule) -->
+    <ClCompile Include="MGE-XE\src\mge\mged3d8device.cpp" />
     <!-- MGE-XE core -->
     <ClCompile Include="MGE-XE\src\mge\api.cpp" />
     <ClCompile Include="MGE-XE\src\mge\configuration.cpp" />
@@ -136,14 +136,6 @@
     <ClCompile Include="MGE-XE\src\mwse\funcweather.cpp" />
     <ClCompile Include="MGE-XE\src\mwse\mgebridge.cpp" />
     <ClCompile Include="MGE-XE\src\mwse\mwseinstruction.cpp" />
-    <!-- MGE-XE IPC (new in UF 0.19.1) -->
-    <ClCompile Include="MGE-XE\src\ipc\bridge.cpp" />
-    <ClCompile Include="MGE-XE\src\ipc\client.cpp" />
-    <ClCompile Include="MGE-XE\src\ipc\dlshare.cpp" />
-    <ClCompile Include="MGE-XE\src\ipc\vec.cpp" />
-    <ClCompile Include="MGE-XE\src\ipc\vecbase.cpp" />
-    <ClCompile Include="MGE-XE\src\ipc\vecwrap.cpp" />
-    <ClCompile Include="MGE-XE\src\ipc\view.cpp" />
     <!-- MGE-XE proxydx (minimal — just dinput8 and GUIDs) -->
     <ClCompile Include="MGE-XE\src\proxydx\dinput8.cpp" />
     <ClCompile Include="MGE-XE\src\proxydx\dxguid.cpp" />
@@ -159,7 +151,7 @@
     <ClInclude Include="source\d3d8types.hpp" />
     <ClInclude Include="source\d3dx9.hpp" />
     <ClInclude Include="source\interface_query.hpp" />
-    <ClInclude Include="source\mge\mged3d8device.h" />
+    <ClInclude Include="MGE-XE\src\mge\mged3d8device.h" />
     <ClInclude Include="res\resource.h" />
   </ItemGroup>
   <ItemGroup>

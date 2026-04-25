@@ -64,14 +64,6 @@ extern "C" BOOL _stdcall DllMain(HANDLE hModule, DWORD reason, void* unused) {
             return true;
         }
 
-#ifdef MGE_RTX
-        // Disable IPC shared memory when running with RTX Remix.
-        if (Configuration.UseSharedMemory) {
-            Configuration.UseSharedMemory = false;
-            LOG::logline("RTX Remix mode: Shared memory disabled, using in-process distant land.");
-        }
-#endif
-
         if (Configuration.MGEFlags & MGE_DISABLED) {
             // Signal that DirectX proxies should not load
             isMW = false;
