@@ -30,10 +30,6 @@ Direct3DDevice8::Direct3DDevice8(Direct3D8 *d3d, IDirect3DDevice9 *ProxyInterfac
 	// The default value of D3DRS_POINTSIZE_MIN is 0.0f in D3D8,
 	// whereas in D3D9 it is 1.0f, so adjust it as needed
 	ProxyInterface->SetRenderState(D3DRS_POINTSIZE_MIN, (DWORD)0.0f);
-	// The DEPTHBIAS value of -0.0f works differently than 0.0f
-	// Some games require defaulting to -0.0f to work correctly
-	const float DepthBias = -0.0f;
-	ProxyInterface->SetRenderState(D3DRS_DEPTHBIAS, *(const DWORD *)&DepthBias);
 }
 Direct3DDevice8::~Direct3DDevice8()
 {
@@ -220,10 +216,6 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 		// The default value of D3DRS_POINTSIZE_MIN is 0.0f in D3D8,
 		// whereas in D3D9 it is 1.0f, so adjust it as needed
 		ProxyInterface->SetRenderState(D3DRS_POINTSIZE_MIN, (DWORD) 0.0f);
-		// The DEPTHBIAS value of -0.0f works differently than 0.0f
-		// Some games require defaulting to -0.0f to work correctly
-		float DepthBias = -0.0f;
-		ProxyInterface->SetRenderState(D3DRS_DEPTHBIAS, *(DWORD*)&DepthBias);
 	}
 
 	return hr;
@@ -591,13 +583,6 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetRenderTarget(IDirect3DSurface8 *pR
 		hr = ProxyInterface->SetDepthStencilSurface(pNewZStencilImpl->GetProxyInterface());
 		if (FAILED(hr))
 			return hr;
-
-		D3DSURFACE_DESC8 Desc = {};
-		pNewZStencilImpl->GetDesc(&Desc);
-
-		CurrentZBufferBitCount = GetDepthStencilBitCount(Desc.Format);
-
-		ProxyInterface->SetRenderState(D3DRS_DEPTHBIAS, CalcDepthBias(CurrentZBiasRenderState, CurrentZBufferBitCount));
 	}
 	else
 	{
@@ -1644,7 +1629,6 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetVertexShader(DWORD Handle)
 	if ((Handle & 0x80000000) == 0)
 	{
 		ProxyInterface->SetVertexShader(nullptr);
-		ProxyInterface->SetVertexDeclaration(nullptr);
 		hr = ProxyInterface->SetFVF(Handle);
 
 		CurrentVertexShaderHandle = 0;
@@ -1689,7 +1673,6 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::DeleteVertexShader(DWORD Handle)
 	if (CurrentVertexShaderHandle == Handle)
 	{
 		ProxyInterface->SetVertexShader(nullptr);
-		ProxyInterface->SetVertexDeclaration(nullptr);
 		CurrentVertexShaderHandle = 0;
 	}
 
