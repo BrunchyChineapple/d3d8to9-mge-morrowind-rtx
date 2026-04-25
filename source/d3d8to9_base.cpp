@@ -299,6 +299,22 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 	DeviceInterface->SetRenderState(D3DRS_RANGEFOGENABLE, RangedFog);
 #endif // MGE_FOG
 	DeviceInterface->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, (Configuration.AALevel > 0));
+#ifdef MGE_RTX
+	// Force disable MW/MGE blend for RTX Remix.
+	// The blend pass renders distant land to an intermediate texture then composites it
+	// as a full-screen quad. Remix's temporal denoiser can't track this screen-space blit,
+	// causing flickering/ghosting on camera movement. With blend disabled, distant land
+	// draws directly to the backbuffer as 3D geometry that Remix can track properly.
+	Configuration.MGEFlags |= NO_MW_MGE_BLEND;
+
+	// Disable post-process shaders — these are screen-space effects that conflict
+	// with Remix's own denoising, tonemapping, and post-processing pipeline.
+	Configuration.MGEFlags &= ~USE_HW_SHADER;
+
+	// Disable menu caching — the cached render blit is a screen-space operation
+	// that Remix can't track temporally.
+	Configuration.MGEFlags &= ~USE_MENU_CACHING;
+#endif // MGE_RTX
 #endif // MGE_XE
 	///////////////////////////////////////
 
