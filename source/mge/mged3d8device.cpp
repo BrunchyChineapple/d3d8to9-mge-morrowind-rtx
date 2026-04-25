@@ -208,6 +208,9 @@ HRESULT _stdcall MGEProxyDevice::Present(const RECT* a, const RECT* b, HWND c, c
     isFrameComplete = false;
     isHUDComplete = false;
 
+    // At the start of each frame, the render target is the backbuffer
+    rendertargetNormal = true;
+
     return Direct3DDevice8::Present(a, b, c, d);
 }
 
@@ -216,9 +219,13 @@ HRESULT _stdcall MGEProxyDevice::Present(const RECT* a, const RECT* b, HWND c, c
 HRESULT _stdcall MGEProxyDevice::SetRenderTarget(IDirect3DSurface8* a, IDirect3DSurface8* b) {
     if (a) {
         // Compare D3D8 wrapper pointers directly.
-        // This is reliable because d3d8to9's AddressLookupTable ensures the same
-        // Direct3DSurface8 wrapper is returned for the same underlying D3D9 surface.
         rendertargetNormal = (cachedBackBufferD3D8 != nullptr && a == cachedBackBufferD3D8);
+
+        static int rtLogCount = 0;
+        if (DistantLand::ready && rtLogCount < 20) {
+            LOG::logline("SetRenderTarget: a=%p cached=%p match=%d", a, cachedBackBufferD3D8, rendertargetNormal);
+            rtLogCount++;
+        }
     }
 
     return Direct3DDevice8::SetRenderTarget(a, b);
