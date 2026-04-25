@@ -181,7 +181,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateAdditionalSwapChain(D3DPRESENT_
 	if (FAILED(hr))
 		return hr;
 
-	*ppSwapChain = ProxyAddressLookupTable->FindAddress<Direct3DSwapChain8>(SwapChainInterface);
+	*ppSwapChain = new Direct3DSwapChain8(this, SwapChainInterface);
 
 	return D3D_OK;
 }
@@ -287,7 +287,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateTexture(UINT Width, UINT Height
 	if (FAILED(hr))
 		return hr;
 
-	*ppTexture = ProxyAddressLookupTable->FindAddress<Direct3DTexture8>(TextureInterface);
+	*ppTexture = new Direct3DTexture8(this, TextureInterface);
 
 	return D3D_OK;
 }
@@ -307,7 +307,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateVolumeTexture(UINT Width, UINT 
 	if (FAILED(hr))
 		return hr;
 
-	*ppVolumeTexture = ProxyAddressLookupTable->FindAddress<Direct3DVolumeTexture8>(TextureInterface);
+	*ppVolumeTexture = new Direct3DVolumeTexture8(this, TextureInterface);
 
 	return D3D_OK;
 }
@@ -327,7 +327,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateCubeTexture(UINT EdgeLength, UI
 	if (FAILED(hr))
 		return hr;
 
-	*ppCubeTexture = ProxyAddressLookupTable->FindAddress<Direct3DCubeTexture8>(TextureInterface);
+	*ppCubeTexture = new Direct3DCubeTexture8(this, TextureInterface);
 
 	return D3D_OK;
 }
@@ -344,7 +344,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateVertexBuffer(UINT Length, DWORD
 	if (FAILED(hr))
 		return hr;
 
-	*ppVertexBuffer = ProxyAddressLookupTable->FindAddress<Direct3DVertexBuffer8>(BufferInterface);
+	*ppVertexBuffer = new Direct3DVertexBuffer8(this, BufferInterface);
 
 	return D3D_OK;
 }
@@ -361,7 +361,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateIndexBuffer(UINT Length, DWORD 
 	if (FAILED(hr))
 		return hr;
 
-	*ppIndexBuffer = ProxyAddressLookupTable->FindAddress<Direct3DIndexBuffer8>(BufferInterface);
+	*ppIndexBuffer = new Direct3DIndexBuffer8(this, BufferInterface);
 
 	return D3D_OK;
 }
@@ -381,7 +381,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateRenderTarget(UINT Width, UINT H
 	if (FAILED(hr))
 		return hr;
 
-	*ppSurface = ProxyAddressLookupTable->FindAddress<Direct3DSurface8>(SurfaceInterface);
+	*ppSurface = new Direct3DSurface8(this, SurfaceInterface);
 
 	return D3D_OK;
 }
@@ -401,7 +401,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateDepthStencilSurface(UINT Width,
 	if (FAILED(hr))
 		return hr;
 
-	*ppSurface = ProxyAddressLookupTable->FindAddress<Direct3DSurface8>(SurfaceInterface);
+	*ppSurface = new Direct3DSurface8(this, SurfaceInterface);
 
 	return D3D_OK;
 }
@@ -432,7 +432,7 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::CreateImageSurface(UINT Width, UINT H
 		return hr;
 	}
 
-	*ppSurface = ProxyAddressLookupTable->FindAddress<Direct3DSurface8>(SurfaceInterface);
+	*ppSurface = new Direct3DSurface8(this, SurfaceInterface);
 
 	return D3D_OK;
 }
