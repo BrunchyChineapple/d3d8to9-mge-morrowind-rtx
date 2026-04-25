@@ -1,5 +1,7 @@
+LIBRARY d3d8
 EXPORTS
 	ValidatePixelShader
 	ValidateVertexShader
 	DebugSetMute
 	Direct3DCreate8
+	DirectInput8Create=FakeDirectInputCreate
