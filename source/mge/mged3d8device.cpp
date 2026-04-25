@@ -220,12 +220,6 @@ HRESULT _stdcall MGEProxyDevice::SetRenderTarget(IDirect3DSurface8* a, IDirect3D
     if (a) {
         // Compare D3D8 wrapper pointers directly.
         rendertargetNormal = (cachedBackBufferD3D8 != nullptr && a == cachedBackBufferD3D8);
-
-        static int rtLogCount = 0;
-        if (DistantLand::ready && rtLogCount < 20) {
-            LOG::logline("SetRenderTarget: a=%p cached=%p match=%d", a, cachedBackBufferD3D8, rendertargetNormal);
-            rtLogCount++;
-        }
     }
 
     return Direct3DDevice8::SetRenderTarget(a, b);
@@ -280,14 +274,6 @@ HRESULT _stdcall MGEProxyDevice::BeginScene() {
 
 // EndScene
 HRESULT _stdcall MGEProxyDevice::EndScene() {
-    // Debug: log rendering state for first few frames after DL init
-    static int esLogCount = 0;
-    if (DistantLand::ready && esLogCount < 20) {
-        LOG::logline("EndScene: ready=%d rtNormal=%d sceneCount=%d stage0=%d isMainView=%d isFrameComplete=%d",
-            DistantLand::ready, rendertargetNormal, sceneCount, stage0Complete, isMainView, isFrameComplete);
-        esLogCount++;
-    }
-
     if (DistantLand::ready && rendertargetNormal) {
         if (sceneCount == 0) {
             if (!stage0Complete) {
