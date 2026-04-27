@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "../d3d8to9.hpp"
+#include "d3d8interface.h"
 
-// MGE-XE code that references ProxySurface should use Direct3DSurface8 instead
-typedef Direct3DSurface8 ProxySurface;
+// ProxySurface is already typedef'd in d3d8interface.h shadow.
+// This file exists so that #include "proxydx/d3d8surface.h" resolves.

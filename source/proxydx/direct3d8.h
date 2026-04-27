@@ -4,9 +4,7 @@
  */
 #pragma once
 
-#include "../d3d8to9.hpp"
+#include "d3d8interface.h"
 
-// Already typedef'd in d3d8device.h shadow, but guard for direct includes
-#ifndef ProxyD3D
-typedef Direct3D8 ProxyD3D;
-#endif
+// ProxyD3D is already typedef'd in d3d8interface.h shadow.
+// This file exists so that #include "proxydx/direct3d8.h" resolves.

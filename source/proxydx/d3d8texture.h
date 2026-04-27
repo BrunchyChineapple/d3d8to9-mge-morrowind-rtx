@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "../d3d8to9.hpp"
+#include "d3d8interface.h"
 
-// MGE-XE code that references ProxyTexture should use Direct3DTexture8 instead
-typedef Direct3DTexture8 ProxyTexture;
+// ProxyTexture is already typedef'd in d3d8interface.h shadow.
+// This file exists so that #include "proxydx/d3d8texture.h" resolves.

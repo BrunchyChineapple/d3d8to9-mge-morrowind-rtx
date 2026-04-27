@@ -5,6 +5,9 @@
 
 #include "d3d8to9.hpp"
 #include <mge/configuration.h>
+#ifdef MGE_RTX
+#include "remix_api_test.h"
+#endif
 
 static const D3DFORMAT AdapterFormats[] = {
 	D3DFMT_A8R8G8B8,
@@ -320,6 +323,11 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 
 	// Set default vertex declaration
 	DeviceInterface->SetFVF(D3DFVF_XYZ);
+
+#ifdef MGE_RTX
+	// Test Remix SDK API availability from 32-bit bridge client
+	RemixAPITest::initialize();
+#endif
 
 	return D3D_OK;
 }

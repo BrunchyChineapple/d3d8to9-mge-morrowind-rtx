@@ -97,6 +97,7 @@
     <ClCompile Include="source\d3d8to9_volume.cpp" />
     <ClCompile Include="source\d3d8types.cpp" />
     <ClCompile Include="source\interface_query.cpp" />
+    <ClCompile Include="source\remix_api_test.cpp" />
     <!-- MGEProxyDevice (rfuzzo's bridge from MGE-XE submodule) -->
     <ClCompile Include="MGE-XE\src\mge\mged3d8device.cpp" />
     <!-- MGE-XE core -->
