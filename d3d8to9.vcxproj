@@ -141,6 +141,12 @@
     <!-- MGE-XE proxydx (minimal — just dinput8 and GUIDs) -->
     <ClCompile Include="MGE-XE\src\proxydx\dinput8.cpp" />
     <ClCompile Include="MGE-XE\src\proxydx\dxguid.cpp" />
+    <!-- MGE-XE IPC (client-side shared memory for 64-bit distant land server) -->
+    <ClCompile Include="MGE-XE\src\ipc\bridge.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\client.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\dlshare.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\vecbase.cpp" />
+    <ClCompile Include="MGE-XE\src\ipc\vecwrap.cpp" />
     <!-- MGE-XE support -->
     <ClCompile Include="MGE-XE\src\support\log.cpp" />
     <ClCompile Include="MGE-XE\src\support\pngsave.cpp" />
