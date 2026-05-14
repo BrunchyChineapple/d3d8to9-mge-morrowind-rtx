@@ -58,7 +58,7 @@
 
 #define REMIXAPI_VERSION_MAJOR 0
 #define REMIXAPI_VERSION_MINOR 6
-#define REMIXAPI_VERSION_PATCH 3
+#define REMIXAPI_VERSION_PATCH 4
 
 
 // External
@@ -980,6 +980,8 @@ extern "C" {
   typedef remixapi_ErrorCode(REMIXAPI_PTR* PFN_remixapi_GetVramStats)(
     remixapi_VramStats* out_stats);
 
+  // NOTE: If adding a new function, append at the end of the struct.
+  //       Reordering breaks backwards compatibility.
   typedef struct remixapi_Interface {
     PFN_remixapi_Shutdown           Shutdown;
     PFN_remixapi_CreateMaterial     CreateMaterial;
@@ -988,7 +990,6 @@ extern "C" {
     PFN_remixapi_CreateMeshBatched  CreateMeshBatched;
     PFN_remixapi_DestroyMesh        DestroyMesh;
     PFN_remixapi_SetupCamera        SetupCamera;
-    PFN_remixapi_SetCameraMediumMaterial SetCameraMediumMaterial;
     PFN_remixapi_DrawInstance       DrawInstance;
     PFN_remixapi_CreateLight        CreateLight;
     PFN_remixapi_CreateLightBatched CreateLightBatched;
@@ -1034,6 +1035,8 @@ extern "C" {
     PFN_remixapi_GetVramStats               GetVramStats;
     PFN_remixapi_RequestTextureVramFree     RequestTextureVramFree;
     PFN_remixapi_GetGameValue               GetGameValue;
+
+    PFN_remixapi_SetCameraMediumMaterial SetCameraMediumMaterial;
   } remixapi_Interface;
 
   REMIXAPI remixapi_ErrorCode REMIXAPI_CALL remixapi_InitializeLibrary(
