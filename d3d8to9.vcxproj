@@ -98,10 +98,17 @@
     <ClCompile Include="source\d3d8types.cpp" />
     <ClCompile Include="source\interface_query.cpp" />
     <ClCompile Include="source\remix_api_test.cpp" />
+    <ClCompile Include="source\rt_anticull.cpp" />
+    <ClCompile Include="source\world_batch.cpp" />
+    <ClCompile Include="source\haze_config.cpp" />
+    <ClCompile Include="source\dlcull_config.cpp" />
+    <ClCompile Include="source\sky_config.cpp" />
     <!-- MGEProxyDevice (rfuzzo's bridge from MGE-XE submodule) -->
     <ClCompile Include="MGE-XE\src\mge\mged3d8device.cpp" />
     <!-- MGE-XE core -->
     <ClCompile Include="MGE-XE\src\mge\api.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\compositecache.cpp" />
+    <ClCompile Include="MGE-XE\src\mge\compositetelemetry.cpp" />
     <ClCompile Include="MGE-XE\src\mge\configuration.cpp" />
     <ClCompile Include="MGE-XE\src\mge\distantinit.cpp" />
     <ClCompile Include="MGE-XE\src\mge\distantland.cpp" />
@@ -159,6 +166,15 @@
     <ClInclude Include="source\d3d8types.hpp" />
     <ClInclude Include="source\d3dx9.hpp" />
     <ClInclude Include="source\interface_query.hpp" />
+    <ClInclude Include="source\rt_anticull.h" />
+    <ClInclude Include="source\world_batch.h" />
+    <ClInclude Include="source\haze_config.h" />
+    <ClInclude Include="source\dlcull_config.h" />
+    <ClInclude Include="source\sky_config.h" />
+    <ClInclude Include="MGE-XE\src\mge\compositecache.h" />
+    <ClInclude Include="MGE-XE\src\mge\compositetelemetry.h" />
+    <ClInclude Include="MGE-XE\src\mge\dlcomposite.h" />
+    <ClInclude Include="MGE-XE\src\mge\dlstreamer.h" />
     <ClInclude Include="MGE-XE\src\mge\mged3d8device.h" />
     <ClInclude Include="res\resource.h" />
   </ItemGroup>

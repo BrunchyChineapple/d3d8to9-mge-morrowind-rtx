@@ -85,6 +85,11 @@ D3DRESOURCETYPE STDMETHODCALLTYPE Direct3DVertexBuffer8::GetType()
 
 HRESULT STDMETHODCALLTYPE Direct3DVertexBuffer8::Lock(UINT OffsetToLock, UINT SizeToLock, BYTE **ppbData, DWORD Flags)
 {
+#ifdef MGE_RTX
+	if ((Flags & D3DLOCK_READONLY) == 0)
+		worldInstr_NoteVBWriteLock(this);   // write-lock -> content may be dynamic (Tier 4 classifier)
+#endif
+
 	if ((Flags & D3DLOCK_DISCARD) != 0)
 	{
 		D3DVERTEXBUFFER_DESC desc;

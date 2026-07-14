@@ -29,3 +29,6 @@ x86/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
+
+# Build logs
+*.log

@@ -153,6 +153,7 @@
     <ClCompile Include="..\MGE-XE\src\ipc\vecwrap.cpp" />
     <ClCompile Include="..\MGE-XE\src\mge\configuration.cpp" />
     <ClCompile Include="..\MGE-XE\src\mge\dlmath.cpp" />
+    <ClCompile Include="..\MGE-XE\src\mge\dlstreamer.cpp" />
     <ClCompile Include="..\MGE-XE\src\mge\memorypool.cpp" />
     <ClCompile Include="..\MGE-XE\src\mge\quadtree.cpp" />
     <ClCompile Include="..\MGE-XE\src\support\log.cpp" />
@@ -167,8 +168,10 @@
     <ClInclude Include="..\MGE-XE\src\ipc\vecwrap.h" />
     <ClInclude Include="..\MGE-XE\src\mge\configinternal.h" />
     <ClInclude Include="..\MGE-XE\src\mge\configuration.h" />
+    <ClInclude Include="..\MGE-XE\src\mge\dlcomposite.h" />
     <ClInclude Include="..\MGE-XE\src\mge\dlformat.h" />
     <ClInclude Include="..\MGE-XE\src\mge\dlmath.h" />
+    <ClInclude Include="..\MGE-XE\src\mge\dlstreamer.h" />
     <ClInclude Include="..\MGE-XE\src\mge\inidata.h" />
     <ClInclude Include="..\MGE-XE\src\mge\memorypool.h" />
     <ClInclude Include="..\MGE-XE\src\mge\quadtree.h" />

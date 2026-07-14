@@ -1,3 +1,4 @@
 [submodule "MGE-XE"]
 	path = MGE-XE
-	url = https://github.com/Hrnchamd/MGE-XE.git
+	url = https://github.com/BrunchyChineapple/MGE-XE.git
+	branch = morrowind-rtx

@@ -63,6 +63,9 @@
     <ClCompile Include="..\src\mge\dlmath.cpp">
       <Filter>Source Files\mge</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\mge\dlstreamer.cpp">
+      <Filter>Source Files\mge</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\mge\memorypool.cpp">
       <Filter>Source Files\mge</Filter>
     </ClCompile>
@@ -105,6 +108,12 @@
       <Filter>Header Files\mge</Filter>
     </ClInclude>
     <ClInclude Include="..\src\mge\dlformat.h">
+      <Filter>Header Files\mge</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\mge\dlcomposite.h">
+      <Filter>Header Files\mge</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\mge\dlstreamer.h">
       <Filter>Header Files\mge</Filter>
     </ClInclude>
     <ClInclude Include="..\src\mge\dlmath.h">

@@ -15,6 +15,518 @@ struct VertexShaderInfo
 	IDirect3DVertexDeclaration9 *Declaration = nullptr;
 };
 
+#ifdef MGE_RTX
+#include "support/log.h"
+#include <unordered_map>
+#include <unordered_set>
+#include <cstdlib>
+#include <vector>
+#include <cstdio>
+#ifndef REMIX_ALLOW_X86
+#define REMIX_ALLOW_X86
+#endif
+#include "remix_api_test.h"   // RemixAPITest::getInterface() / isInitialized()
+#include "remix_c.h"          // remixapi_* structs / entrypoints
+#include "world_batch.h"      // worldBatchTier4Enabled() — runtime in-game toggle (MGE Batching MCM)
+#define XXH_INLINE_ALL
+#define XXH_VECTOR 0          // force scalar XXH3 (0=XXH_SCALAR); XXH3 is vectorization-independent
+#pragma optimize("", off)    // MSVC /O2 ICEs inside XXH64; xxhash is not perf-critical here
+#include "xxhash.h"           // replicate Remix's legacy geometry hash (XXH3 + classic XXH64)
+#pragma optimize("", on)
+
+// --- Near-draw static-content tracking (shared infrastructure) ---
+// The Tier 4 batcher classifies a near draw as truly static when its source VB has NOT
+// been write-locked in the last few frames. Morrowind flags nothing D3DUSAGE_DYNAMIC and
+// CPU-skins by re-locking static VBs every frame, so VB-relock is the only reliable static
+// signal. g_frameId is advanced per Present; g_vbLastWriteFrame records each VB's last
+// write-lock (populated from Direct3DVertexBuffer8::Lock via worldInstr_NoteVBWriteLock).
+// (The diagnostics-only draw-stream classifier that produced the v1/v2 scoping data lived
+// here and was retired once Tier 4 was confirmed; recover it from git/backup if a future
+// near-stream tier needs re-scoping.)
+namespace {
+	uint32_t g_frameId = 0;
+	std::unordered_map<void*, uint32_t> g_vbLastWriteFrame;  // VB -> frame of last write-lock
+	std::unordered_set<void*> g_vbDynamic;                   // VBs ever re-locked on a later frame = animated
+}
+
+// --- Tier 4: near-static-geometry batching ---
+// Transcodes Morrowind's own opaque, truly-static, FFP indexed draws into Remix-API
+// CreateMeshBatched + DrawInstance, reusing the Tier 1 texture-hash material path. Gated
+// by the marker file "mge_batch_world_apply.txt" (or env MGE_BATCH_WORLD_APPLY=1). Once a
+// draw signature has warmed up (its texture is registered and its mesh+material are cached),
+// the batched copy stands in for the original draw and the FFP DrawIndexedPrimitive is
+// suppressed — that is the perf win (no per-object SetTexture/SetTransform/Draw, no per-frame
+// Remix geometry hashing). Static detection reuses g_vbLastWriteFrame: Morrowind flags
+// nothing D3DUSAGE_DYNAMIC and CPU-skins by re-locking static VBs, so "not write-locked in
+// the last few frames" is the only reliable static signal.
+namespace {
+
+// Resolve the Remix interface lazily and cache it; it may not be live on the first draws.
+remixapi_Interface* worldBatchRemix() {
+	static remixapi_Interface* s_remix = nullptr;
+	if (!s_remix && RemixAPITest::isInitialized()) {
+		remixapi_Interface* r = RemixAPITest::getInterface();
+		if (r && r->CreateMeshBatched && r->DrawInstance && r->CreateMaterial && r->dxvk_GetTextureHash)
+			s_remix = r;
+	}
+	return s_remix;
+}
+
+uint64_t worldBatchHash(const void* data, size_t len, uint64_t h = 1469598103934665603ull) {
+	const unsigned char* p = (const unsigned char*)data;
+	for (size_t i = 0; i < len; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+	return h;
+}
+
+// Texture hashes that must NEVER be batched (treated as UI). Morrowind draws its mouse cursor
+// with the SAME FFP state as world geometry (perspective, lit, depth test+write on) — confirmed
+// via diagnostics — so only the bound texture distinguishes it, mirroring Remix's own uiTextures
+// mechanism. Seeded with the vanilla cursor texture hash (observed in-game) plus any hex hashes
+// listed one-per-line in the sidecar "mge_batch_ignore.txt" (so other setups can add their own).
+const std::unordered_set<uint64_t>& worldBatchIgnoreTexHashes() {
+	static std::unordered_set<uint64_t> s;
+	static bool loaded = false;
+	if (!loaded) {
+		loaded = true;
+		s.insert(0x2DCCDB2D8536B5DFull);   // Morrowind mouse cursor
+		FILE* f = nullptr;
+		if (fopen_s(&f, "mge_batch_ignore.txt", "r") == 0 && f) {
+			char line[64];
+			while (fgets(line, sizeof(line), f)) {
+				unsigned long long h = 0;
+				if (sscanf_s(line, "%llx", &h) == 1 && h) s.insert((uint64_t)h);
+			}
+			fclose(f);
+		}
+	}
+	return s;
+}
+
+// TEST (terrain-exclude experiment): texture hashes in rtx.terrainTextures must NOT be batched.
+// Remix bakes terrain-categorized textures into the terrain cascade via the LEGACY draw path
+// (RtxContext::bakeTerrain); the external/API submit path (submitExternalDraw) flags the surface
+// Terrain via externalDrawTextureCategories but NEVER bakes it -> the surface samples an
+// unpopulated terrain cascade -> flat grey, regardless of how valid its albedo index is. Leaving
+// these draws on the legacy FFP path lets Remix bake + sample them normally. Hashes are loaded
+// (hex, one per line) from the sidecar "mge_batch_terrain.txt"; absent file => empty set => no-op.
+const std::unordered_set<uint64_t>& worldBatchTerrainExcludeHashes() {
+	static std::unordered_set<uint64_t> s;
+	static bool loaded = false;
+
+	if (!loaded) {
+		loaded = true;
+		FILE* f = nullptr;
+		if (fopen_s(&f, "mge_batch_terrain.txt", "r") == 0 && f) {
+			char line[64];
+			while (fgets(line, sizeof(line), f)) {
+				if (line[0] == '#') continue;
+				unsigned long long h = 0;
+				if (sscanf_s(line, "%llx", &h) == 1 && h) s.insert((uint64_t)h);
+			}
+			fclose(f);
+		}
+	}
+	return s;
+}
+
+// White-wall exclude (Path B): a small set of toolkit-replaced 4K-PBR wall materials render flat
+// white/grey on the batched/external path due to a deep Remix GPU-descriptor/shader bug (the CPU
+// chain is proven correct end-to-end; needs a GPU capture to pin — see batching-and-perf-handoff.md
+// §44-§46). Until the root cause is fixed fork-side, these few textures are left on the legacy FFP
+// path, where they render perfectly. Everything else stays batched. Seeded with the 4 known white
+// walls and extendable via the sidecar "mge_batch_whitewall.txt" (hex, one per line; '#' = comment).
+// These are VANILLA/runtime texture hashes (== dxvk_GetTextureHash == [whiteres] apiTex), the same
+// hash space worldBatchCreateMesh keys on, so the exclude matches the right value.
+const std::unordered_set<uint64_t>& worldBatchWhiteExcludeHashes() {
+	static std::unordered_set<uint64_t> s;
+	static bool loaded = false;
+	if (!loaded) {
+		loaded = true;
+		s.insert(0x02C4AD62308AAC11ull);   // brushedwall bricks (always white)
+		s.insert(0x65D3DB6490140D66ull);   // sometimes white
+		s.insert(0xBC3FA28BF04FB18Dull);   // CobblestoneCorners (cobblestone/chimney)
+		s.insert(0x79621746170187AFull);   // wall part
+		FILE* f = nullptr;
+		if (fopen_s(&f, "mge_batch_whitewall.txt", "r") == 0 && f) {
+			char line[64];
+			while (fgets(line, sizeof(line), f)) {
+				if (line[0] == '#') continue;
+				unsigned long long h = 0;
+				if (sscanf_s(line, "%llx", &h) == 1 && h) s.insert((uint64_t)h);
+			}
+			fclose(f);
+		}
+	}
+	return s;
+}
+
+// Warm-up length (frames a static draws via the legacy FFP path before we batch it and SUPPRESS
+// the FFP draw). The legacy draw is what drives a replacement texture to FULL residency; large
+// (4K, ~22MB) replacement albedos can't finish streaming within a 1-frame warm-up on a cold
+// cell-load, so once the FFP draw is suppressed the texture never reaches full res and the wall
+// renders white. A longer warm-up keeps the legacy draw alive until the texture is resident.
+// Configurable via sidecar "mge_batch_warmup.txt" (a single integer, frames) so it can be tuned
+// in-game without a rebuild; default 300 (~5s @ 60fps). Read once, cached.
+uint32_t worldBatchWarmupFrames() {
+	static uint32_t v = 0;
+	static bool loaded = false;
+	if (!loaded) {
+		loaded = true;
+		v = 300;
+		FILE* f = nullptr;
+		if (fopen_s(&f, "mge_batch_warmup.txt", "r") == 0 && f) {
+			unsigned long n = 0;
+			if (fscanf_s(f, "%lu", &n) == 1) v = (uint32_t)n;
+			fclose(f);
+		}
+	}
+	return v;
+}
+
+// One Remix material per source texture, mirroring the Tier 1 texture-hash path. Only used as
+// the FALLBACK look for statics that have NO toolkit replacement (when a replacement exists,
+// Remix renders the USD material and ignores this one). texHash is the value dxvk_GetTextureHash
+// returned for the bound texture (== Remix's colorTexture0 image hash), passed in so we compute
+// it once and reuse it for both the material and the mesh identity.
+std::unordered_map<IDirect3DTexture9*, remixapi_MaterialHandle> g_worldMatCache;
+
+remixapi_MaterialHandle worldBatchMaterial(remixapi_Interface* remix, IDirect3DTexture9* tex,
+                                           uint64_t texHash, bool hasAlpha) {
+	auto it = g_worldMatCache.find(tex);
+	if (it != g_worldMatCache.end()) return it->second;
+
+	remixapi_MaterialHandle h = nullptr;
+	if (tex && texHash != 0) {
+		wchar_t albedoPath[24];
+		swprintf_s(albedoPath, L"0x%016llX", (unsigned long long)texHash);
+
+		remixapi_MaterialInfoOpaqueEXT op = {};
+		op.sType = REMIXAPI_STRUCT_TYPE_MATERIAL_INFO_OPAQUE_EXT;
+		// Fallback albedo constant (white) — only used when the "0x<hash>" albedo texture fails to
+		// resolve and no toolkit replacement exists. Resolved textures / replacements override it.
+		op.albedoConstant.x = 1.0f; op.albedoConstant.y = 1.0f; op.albedoConstant.z = 1.0f;
+		op.opacityConstant = 1.0f;
+		op.roughnessConstant = 1.0f;
+		op.metallicConstant = 0.0f;
+		op.alphaTestType = hasAlpha ? 6 : 7;   // kGreaterOrEqual@128 : kAlways (0 = kNever discards all)
+		op.alphaReferenceValue = 128;
+
+		remixapi_MaterialInfo mi = {};
+		mi.sType = REMIXAPI_STRUCT_TYPE_MATERIAL_INFO;
+		mi.pNext = &op;
+		mi.hash = texHash;
+		mi.albedoTexture = albedoPath;
+		mi.emissiveIntensity = 0.0f;
+		mi.filterMode = 1;   // Linear
+		mi.wrapModeU  = 1;   // Repeat
+		mi.wrapModeV  = 1;   // Repeat
+
+		if (remix->CreateMaterial(&mi, &h) != REMIXAPI_ERROR_CODE_SUCCESS) h = nullptr;
+	}
+	g_worldMatCache[tex] = h;
+	return h;
+}
+
+// Decode one near draw into a local mesh and create a batched Remix mesh whose info.hash equals
+// the LEGACY replacement key Remix would compute for this draw — so existing toolkit mesh/material
+// replacements (authored against the legacy draw) apply to the batched copy. That key is:
+//   geometryHash(positions, indices, geometrydescriptor)  XOR  colorTexture0 image hash
+// Geometry hash recipe (replicating Remix exactly, see findings_remix_geohash.md):
+//   - positions: XXH3_64 seed-chain over 12 position bytes of each USED vertex, ascending by
+//     rebased index, dedup. min/max are RECOMPUTED from the indices (Remix ignores the D3D
+//     MinIndex/NumVertices params), positions read at (baseVertexIndex + index)*stride.
+//   - indices: single XXH3_64 over the rebased indices in their original width, draw order.
+//   - descriptor: XXH3_64 seed-chain over uint32 {indexCount, vertexCount, VkTopology=3, VkIndexType}.
+//   - combine: classic XXH64 chain in enum order positions -> indices -> descriptor.
+// texHash comes from dxvk_GetTextureHash (== Remix colorTexture0 image hash). FVF position is
+// FLOAT3 @ offset 0 for both 0x152 and 0x112. Returns null (leave on FFP) on any failure.
+remixapi_MeshHandle worldBatchCreateMesh(remixapi_Interface* remix,
+		IDirect3DVertexBuffer8* vb, UINT stride, IDirect3DIndexBuffer8* ib,
+		IDirect3DTexture9* tex, DWORD fvf, bool hasAlpha,
+		INT baseVertexIndex, UINT startIndex, UINT primCount) {
+	const bool hasColor = (fvf == 0x152);
+	const UINT normOff = 12, colorOff = 24;
+	const UINT uvOff = hasColor ? 28u : 24u;
+	const UINT impliedSize = hasColor ? 36u : 32u;
+	if (stride < impliedSize) return nullptr;
+
+	// Texture (material) hash — the legacy key's material component. Required to form the
+	// correct identity; if the bound texture has no resolvable hash, don't batch this draw.
+	uint64_t texHash = 0;
+	if (tex && (remix->dxvk_GetTextureHash(tex, &texHash) != REMIXAPI_ERROR_CODE_SUCCESS || texHash == 0))
+		return nullptr;
+	if (texHash && worldBatchIgnoreTexHashes().count(texHash)) return nullptr;   // UI/cursor texture -> leave on FFP
+	if (texHash && worldBatchTerrainExcludeHashes().count(texHash)) {            // terrain-categorized -> leave on legacy FFP so Remix bakes/samples it
+		return nullptr;
+	}
+	if (texHash && worldBatchWhiteExcludeHashes().count(texHash)) {              // known white-on-replaced 4K wall -> leave on legacy FFP (renders perfectly there)
+		return nullptr;
+	}
+
+	const uint32_t indexCount = primCount * 3u;
+	if (indexCount == 0) return nullptr;
+
+	D3DINDEXBUFFER_DESC id = {};
+	ib->GetDesc(&id);
+	const bool idx32 = (id.Format == D3DFMT_INDEX32);
+
+	void* isrc = nullptr;
+	if (FAILED(ib->Lock(0, 0, (BYTE**)&isrc, D3DLOCK_READONLY)) || !isrc) return nullptr;
+	std::vector<uint32_t> raw(indexCount);
+	uint32_t minI = 0xFFFFFFFFu, maxI = 0;
+	if (idx32) {
+		const uint32_t* s = (const uint32_t*)isrc + startIndex;
+		for (uint32_t k = 0; k < indexCount; ++k) { uint32_t v = s[k]; raw[k] = v; if (v < minI) minI = v; if (v > maxI) maxI = v; }
+	} else {
+		const unsigned short* s = (const unsigned short*)isrc + startIndex;
+		for (uint32_t k = 0; k < indexCount; ++k) { uint32_t v = s[k]; raw[k] = v; if (v < minI) minI = v; if (v > maxI) maxI = v; }
+	}
+	ib->Unlock();
+	if (maxI < minI) return nullptr;
+	const uint32_t vertexCount = maxI - minI + 1;
+
+	// Index sub-hash: rebased indices in original width, draw order.
+	uint64_t hIdx;
+	if (idx32) {
+		std::vector<uint32_t> reb(indexCount);
+		for (uint32_t k = 0; k < indexCount; ++k) reb[k] = raw[k] - minI;
+		hIdx = XXH3_64bits(reb.data(), (size_t)indexCount * 4);
+	} else {
+		std::vector<uint16_t> reb(indexCount);
+		for (uint32_t k = 0; k < indexCount; ++k) reb[k] = (uint16_t)(raw[k] - minI);
+		hIdx = XXH3_64bits(reb.data(), (size_t)indexCount * 2);
+	}
+
+	// Descriptor sub-hash (Vulkan enum values: triangle list = 3, index type u16=0 / u32=1).
+	uint64_t hGeo; uint32_t d;
+	d = indexCount;      hGeo = XXH3_64bits_withSeed(&d, 4, 0);
+	d = vertexCount;     hGeo = XXH3_64bits_withSeed(&d, 4, hGeo);
+	d = 3u;              hGeo = XXH3_64bits_withSeed(&d, 4, hGeo);
+	d = idx32 ? 1u : 0u; hGeo = XXH3_64bits_withSeed(&d, 4, hGeo);
+
+	// Decode the used-vertex range and compute the position sub-hash over used vertices.
+	void* vsrc = nullptr;
+	if (FAILED(vb->Lock(0, 0, (BYTE**)&vsrc, D3DLOCK_READONLY)) || !vsrc) return nullptr;
+	const UINT firstVert = (UINT)((INT)minI + baseVertexIndex);
+	const unsigned char* vbase = (const unsigned char*)vsrc + (size_t)firstVert * stride;
+
+	std::vector<remixapi_HardcodedVertex> verts(vertexCount);
+	for (uint32_t i = 0; i < vertexCount; ++i) {
+		const unsigned char* p = vbase + (size_t)i * stride;
+		remixapi_HardcodedVertex hv = {};
+		const float* pos = (const float*)(p + 0);
+		hv.position[0] = pos[0]; hv.position[1] = pos[1]; hv.position[2] = pos[2];
+		const float* nrm = (const float*)(p + normOff);
+		hv.normal[0] = nrm[0]; hv.normal[1] = nrm[1]; hv.normal[2] = nrm[2];
+		hv.color = hasColor ? *(const DWORD*)(p + colorOff) : 0xFFFFFFFFu;
+		const float* uv = (const float*)(p + uvOff);
+		hv.texcoord[0] = uv[0]; hv.texcoord[1] = uv[1];
+		verts[i] = hv;
+	}
+	std::vector<uint8_t> used(vertexCount, 0);
+	for (uint32_t k = 0; k < indexCount; ++k) used[raw[k] - minI] = 1;
+	uint64_t hPos = 0;
+	for (uint32_t i = 0; i < vertexCount; ++i)
+		if (used[i]) hPos = XXH3_64bits_withSeed(vbase + (size_t)i * stride, 12, hPos);
+	vb->Unlock();
+
+	// Combine (classic XXH64, enum order positions -> indices -> descriptor) then XOR texture hash.
+	uint64_t geoHash = hPos;
+	geoHash = XXH64(&hIdx, 8, geoHash);
+	geoHash = XXH64(&hGeo, 8, geoHash);
+	const uint64_t meshIdentity = geoHash ^ texHash;
+
+	std::vector<uint32_t> idx(indexCount);
+	for (uint32_t k = 0; k < indexCount; ++k) idx[k] = raw[k] - minI;
+
+	remixapi_MeshInfoSurfaceTriangles surf = {};
+	surf.vertices_values   = verts.data();
+	surf.vertices_count    = verts.size();
+	surf.indices_values    = idx.data();
+	surf.indices_count     = idx.size();
+	surf.skinning_hasvalue = 0;
+	surf.material          = worldBatchMaterial(remix, tex, texHash, hasAlpha);
+
+	remixapi_MeshInfo info = {};
+	info.sType = REMIXAPI_STRUCT_TYPE_MESH_INFO;
+	info.hash  = meshIdentity;       // == legacy replacement key -> inherits existing toolkit replacements
+	info.surfaces_values = &surf;
+	info.surfaces_count  = 1;
+
+	remixapi_MeshHandle h = nullptr;
+	remixapi_ErrorCode rc = remix->CreateMeshBatched(&info, &h);
+	return (rc == REMIXAPI_ERROR_CODE_SUCCESS) ? h : nullptr;
+}
+
+// Per-draw-signature cache: the same VB/IB sub-range drawn at many transforms is one mesh
+// submitted as many instances (the instancing win). created guards a one-shot create so a
+// null (failed) mesh is not re-attempted every frame; firstFrame drives the warm-up.
+struct WorldBatchEntry {
+	remixapi_MeshHandle mesh = nullptr;
+	uint32_t firstFrame = 0;
+	bool seen = false;
+	bool created = false;
+	// Animation exclusion (catches rigid-on-bone clothing/armor/body parts the VB-relock gate
+	// misses — their bind-pose VB only re-locks on re-equip, so they look static while animating
+	// via D3DTS_WORLD): a true world static has a bit-constant transform every frame.
+	uint32_t lastSubmitFrame = 0xFFFFFFFFu;
+	bool haveLastTransform = false;
+	bool instanced = false;   // submitted >=2x in one frame => instanced static, never flag as animated
+	bool animated = false;    // transform changed across consecutive frames => excluded (sticky)
+	D3DMATRIX lastTransform = {};
+};
+std::unordered_map<uint64_t, WorldBatchEntry> g_worldMeshCache;
+
+// Submit a near static draw through the Remix API. Returns TRUE when the batched copy fully
+// stands in for the original draw (so the caller must SUPPRESS the FFP DrawIndexedPrimitive),
+// FALSE when the caller must still issue it (rejected, warming up, or mesh/material not yet
+// resolved — a coincident default-material copy would z-fight the real geometry otherwise).
+bool worldBatchSubmit(IDirect3DDevice9* dev, IDirect3DVertexBuffer8* vb, UINT stride,
+		IDirect3DIndexBuffer8* ib, IDirect3DTexture9* tex, DWORD fvf, DWORD alphaBlend,
+		DWORD alphaTest, INT baseVertexIndex, UINT minIndex, UINT numVertices,
+		UINT startIndex, UINT primCount, D3DPRIMITIVETYPE primType) {
+	// Master + Tier 4 toggle (runtime, in-game via the MGE Batching MCM): when off, near
+	// statics revert to legacy DrawIndexedPrimitive (selectable/editable in the Remix toolkit).
+	if (!worldBatchTier4Enabled()) return false;
+	// Cheap rejects first — the overwhelming majority of near draws bail here.
+	if (primType != D3DPT_TRIANGLELIST) return false;
+	if (fvf != 0x152 && fvf != 0x112) return false;
+	if (alphaBlend) return false;                    // opaque-only; translucent stays on FFP
+	if (!vb || !ib || numVertices == 0 || primCount == 0) return false;
+
+	// Static-content gate: only batch a VB proven static by the relock map. Skinned/animated VBs
+	// are re-locked across frames (sticky g_vbDynamic) and never batched — even while paused;
+	// unknown (never observed) or just-written VBs also stay on FFP.
+	{
+		if (g_vbDynamic.count((void*)vb)) return false;
+		auto it = g_vbLastWriteFrame.find((void*)vb);
+		if (it == g_vbLastWriteFrame.end()) return false;
+		if ((g_frameId - it->second) <= 2) return false;
+	}
+
+	remixapi_Interface* remix = worldBatchRemix();
+	if (!remix) return false;
+
+	// Live device-state rejects:
+	// - Orthographic projection or depth-write off => 2D UI/overlay (not solid world geometry).
+	//   (The mouse cursor draws with world-like state and is excluded by texture hash instead.)
+	// - FFP vertex blending on => skinned character/creature/clothing geometry: a bind-pose VB
+	//   skinned by MULTIPLE bone matrices (D3DTS_WORLDMATRIX[n]), animated by changing those
+	//   matrices. We can only submit ONE transform over the bind-pose verts, so a batched copy
+	//   renders wrong/invisible. These are NOT caught by the VB-relock gate — the bind-pose VB
+	//   only re-locks on an equip change (e.g. unsheathing a weapon), not during locomotion —
+	//   which is exactly why worn clothing/armor went invisible until re-equipped. Never batch a
+	//   blended draw.
+	{
+		D3DMATRIX proj; DWORD zwrite = 1, vblend = 0 /*D3DVBF_DISABLE*/, ivblend = 0;
+		dev->GetTransform(D3DTS_PROJECTION, &proj);
+		dev->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
+		dev->GetRenderState(D3DRS_VERTEXBLEND, &vblend);
+		dev->GetRenderState(D3DRS_INDEXEDVERTEXBLENDENABLE, &ivblend);
+		if (proj._44 >= 0.5f || zwrite == 0) return false;
+		if (vblend != 0 || ivblend != 0) return false;
+	}
+
+	// Texgen / texture-coordinate transform exclusion. Some draws (notably terrain/land and other
+	// special-mapped surfaces) compute their UVs via FFP texgen (D3DTSS_TEXCOORDINDEX TCI flags:
+	// camera-space / spheremap) or a D3DTS_TEXTURE0 transform matrix, leaving the stored VB texcoords
+	// as constant placeholders. Our batched mesh copies those raw VB texcoords verbatim, so the
+	// submitted UVs come out constant -> the (correct, resident) replacement albedo samples a single
+	// texel -> the surface renders flat WHITE. Confirmed in-game via the Remix "Texture Coordinates"
+	// debug view (uniform UV on the white ground). View-dependent texgen fundamentally cannot be
+	// baked into one static mesh, so leave any such draw on the legacy FFP path (which applies the
+	// transform correctly). A normal pass-through stage reads tci==0 (D3DTSS_TCI_PASSTHRU, coord set
+	// 0) and ttff==0 (D3DTTFF_DISABLE), so this only excludes the special cases.
+	{
+		DWORD tci = 0, ttff = 0;
+		dev->GetTextureStageState(0, D3DTSS_TEXCOORDINDEX, &tci);
+		dev->GetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, &ttff);
+		if (tci != 0 || ttff != 0 /*D3DTTFF_DISABLE*/) {
+			return false;
+		}
+	}
+
+	const uint64_t sigParts[8] = {
+		(uint64_t)(uintptr_t)vb, (uint64_t)(uintptr_t)ib,
+		(uint64_t)(uint32_t)baseVertexIndex, (uint64_t)startIndex,
+		(uint64_t)primCount, (uint64_t)minIndex, (uint64_t)numVertices, (uint64_t)fvf
+	};
+	WorldBatchEntry& entry = g_worldMeshCache[worldBatchHash(sigParts, sizeof(sigParts))];
+
+	// Per-instance world transform, read LIVE from the device (ground truth).
+	D3DMATRIX m; dev->GetTransform(D3DTS_WORLD, &m);
+
+	// Animation exclusion: a true world static keeps a bit-constant D3DTS_WORLD every frame; a mesh
+	// riding an animated bone (rigid-on-bone clothing/armor/body parts, doors, etc.) changes it.
+	// Such meshes are invisible when single-transform batched and are NOT caught by the VB-relock
+	// gate (their bind-pose VB only re-locks on re-equip — "pops in only when unsheathing"). Flag any
+	// signature whose transform changes across CONSECUTIVE frames and leave it on FFP forever.
+	// Instancing guard: a signature submitted >=2x in one frame is an instanced static (varied
+	// transforms WITHIN a frame is instancing, not animation) and is never flagged.
+	if (entry.lastSubmitFrame == g_frameId) {
+		entry.instanced = true;
+	} else {
+		if (!entry.instanced && entry.haveLastTransform && entry.lastSubmitFrame == g_frameId - 1 &&
+		    memcmp(&m, &entry.lastTransform, sizeof(D3DMATRIX)) != 0) {
+			entry.animated = true;
+		}
+		entry.lastSubmitFrame = g_frameId;
+		entry.lastTransform = m;
+		entry.haveLastTransform = true;
+	}
+	if (entry.animated) return false;   // animated -> keep on FFP, never batch/suppress
+
+	// Warm-up: draw via FFP for some frames before batching+suppressing. The legacy FFP draw drives
+	// the replacement texture to full residency; large 4K albedos need many frames to stream on a
+	// cold load, so the warm-up length is configurable via mge_batch_warmup.txt (default 300).
+	const uint32_t kWorldBatchWarmupFrames = worldBatchWarmupFrames();
+	if (!entry.seen) { entry.seen = true; entry.firstFrame = g_frameId; return false; }
+	if (g_frameId < entry.firstFrame + kWorldBatchWarmupFrames) return false;
+
+	if (!entry.created) {
+		entry.created = true;
+		entry.mesh = worldBatchCreateMesh(remix, vb, stride, ib, tex, fvf, (alphaTest != 0),
+			baseVertexIndex, startIndex, primCount);
+	}
+	if (!entry.mesh) return false;   // decode/create failed -> keep the FFP draw
+
+	remixapi_InstanceInfo inst = {};
+	inst.sType = REMIXAPI_STRUCT_TYPE_INSTANCE_INFO;
+	inst.categoryFlags = 0;
+	inst.mesh = entry.mesh;
+	// D3DMATRIX is row-vector (translation in _41.._43); remix_Transform is a row-major 3x4 used
+	// column-vector — the transpose of the upper 3 rows with translation in matrix[r][3].
+	inst.transform.matrix[0][0] = m._11; inst.transform.matrix[0][1] = m._21; inst.transform.matrix[0][2] = m._31; inst.transform.matrix[0][3] = m._41;
+	inst.transform.matrix[1][0] = m._12; inst.transform.matrix[1][1] = m._22; inst.transform.matrix[1][2] = m._32; inst.transform.matrix[1][3] = m._42;
+	inst.transform.matrix[2][0] = m._13; inst.transform.matrix[2][1] = m._23; inst.transform.matrix[2][2] = m._33; inst.transform.matrix[2][3] = m._43;
+	inst.doubleSided = 1;
+	remix->DrawInstance(&inst);
+	return true;   // established -> suppress the duplicate FFP draw
+}
+
+} // namespace
+
+// Cross-file hooks (declared in d3d8to9.hpp). Note a VB write-lock so the near-static batcher
+// can tell truly-static geometry from CPU-skinned/animated (which re-lock every frame).
+void worldInstr_NoteVBWriteLock(void* vb) {
+	if (!vb || !worldBatchTier4Enabled()) return;
+	auto it = g_vbLastWriteFrame.find(vb);
+	if (it != g_vbLastWriteFrame.end() && it->second != g_frameId) {
+		// Re-locked on a LATER frame than first recorded => CPU-skinned/animated content (a true
+		// static's VB is write-locked once at cell load and never again). STICKY: stays dynamic
+		// forever, so when the game pauses (menu) or an actor goes idle and its VB stops being
+		// re-locked, it is NOT misclassified as a batchable static -> fixes invisible NPC/character
+		// bodies on menu-pause / 3rd-person indoors.
+		g_vbDynamic.insert(vb);
+	}
+	g_vbLastWriteFrame[vb] = g_frameId;
+}
+void worldInstr_NextFrame() {
+	if (worldBatchTier4Enabled()) ++g_frameId;
+}
+#endif // MGE_RTX
+
+
 Direct3DDevice8::Direct3DDevice8(Direct3D8 *d3d, IDirect3DDevice9 *ProxyInterface, DWORD BehaviorFlags, BOOL EnableZBufferDiscarding) :
 	D3D(d3d), ProxyInterface(ProxyInterface), ZBufferDiscarding(EnableZBufferDiscarding)
 {
@@ -208,6 +720,10 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::Reset(D3DPRESENT_PARAMETERS8 *pPresen
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::Present(const RECT *pSourceRect, const RECT *pDestRect, HWND hDestWindowOverride, const RGNDATA *pDirtyRegion)
 {
 	UNREFERENCED_PARAMETER(pDirtyRegion);
+
+#ifdef MGE_RTX
+	worldInstr_NextFrame();
+#endif
 
 	return ProxyInterface->Present(pSourceRect, pDestRect, hDestWindowOverride, nullptr);
 }
@@ -709,6 +1225,11 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetRenderState(D3DRENDERSTATETYPE Sta
 	FLOAT Biased;
 	HRESULT hr;
 
+#ifdef MGE_RTX
+	if (State == D3DRS_ALPHABLENDENABLE) dbgAlphaBlend = Value;
+	else if (State == D3DRS_ALPHATESTENABLE) dbgAlphaTest = Value;
+#endif
+
 	switch (static_cast<DWORD>(State))
 	{
 	case D3DRS_ZVISIBLE:
@@ -904,7 +1425,12 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::GetTexture(DWORD Stage, IDirect3DBase
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetTexture(DWORD Stage, IDirect3DBaseTexture8 *pTexture)
 {
 	if (pTexture == nullptr)
+	{
+#ifdef MGE_RTX
+		if (Stage == 0) dbgStage0Tex = nullptr;
+#endif
 		return ProxyInterface->SetTexture(Stage, nullptr);
+	}
 
 	IDirect3DBaseTexture9 *BaseTextureInterface;
 
@@ -922,6 +1448,12 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetTexture(DWORD Stage, IDirect3DBase
 	default:
 		return D3DERR_INVALIDCALL;
 	}
+
+#ifdef MGE_RTX
+	if (Stage == 0)
+		dbgStage0Tex = (pTexture->GetType() == D3DRTYPE_TEXTURE)
+		             ? static_cast<IDirect3DTexture9 *>(BaseTextureInterface) : nullptr;
+#endif
 
 	return ProxyInterface->SetTexture(Stage, BaseTextureInterface);
 }
@@ -1093,6 +1625,13 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::DrawPrimitive(D3DPRIMITIVETYPE Primit
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::DrawIndexedPrimitive(D3DPRIMITIVETYPE PrimitiveType, UINT MinIndex, UINT NumVertices, UINT StartIndex, UINT PrimitiveCount)
 {
 	ApplyClipPlanes();
+#ifdef MGE_RTX
+	if (worldBatchTier4Enabled() && CurrentVertexShaderHandle == 0 &&
+		worldBatchSubmit(ProxyInterface, dbgStream0VB, dbgStream0Stride, dbgIndices, dbgStage0Tex,
+			dbgCurFVF, dbgAlphaBlend, dbgAlphaTest,
+			CurrentBaseVertexIndex, MinIndex, NumVertices, StartIndex, PrimitiveCount, PrimitiveType))
+		return D3D_OK;   // batched copy stands in -> suppress the duplicate FFP draw
+#endif
 	ProxyInterface->DrawIndexedPrimitive(PrimitiveType, CurrentBaseVertexIndex, MinIndex, NumVertices, StartIndex, PrimitiveCount);
 	return D3D_OK;
 }
@@ -1586,6 +2125,9 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetVertexShader(DWORD Handle)
 		hr = ProxyInterface->SetFVF(Handle);
 
 		CurrentVertexShaderHandle = 0;
+#ifdef MGE_RTX
+		dbgCurFVF = Handle;   // FFP: Handle is the FVF
+#endif
 	}
 	else
 	{
@@ -1695,6 +2237,14 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetStreamSource(UINT StreamNumber, ID
 	if (pStreamData != nullptr)
 		pStreamDataImpl = static_cast<Direct3DVertexBuffer8 *>(pStreamData)->GetProxyInterface();
 
+#ifdef MGE_RTX
+	if (StreamNumber == 0)
+	{
+		dbgStream0VB = pStreamData;
+		dbgStream0Stride = Stride;
+	}
+#endif
+
 	return ProxyInterface->SetStreamSource(StreamNumber, pStreamDataImpl, 0, Stride);
 }
 HRESULT STDMETHODCALLTYPE Direct3DDevice8::GetStreamSource(UINT StreamNumber, IDirect3DVertexBuffer8 **ppStreamData, UINT *pStride)
@@ -1730,6 +2280,10 @@ HRESULT STDMETHODCALLTYPE Direct3DDevice8::SetIndices(IDirect3DIndexBuffer8 *pIn
 		return hr;
 
 	CurrentBaseVertexIndex = static_cast<INT>(BaseVertexIndex);
+
+#ifdef MGE_RTX
+	dbgIndices = pIndexData;
+#endif
 
 	return D3D_OK;
 }

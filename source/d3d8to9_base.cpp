@@ -7,6 +7,7 @@
 #include <mge/configuration.h>
 #ifdef MGE_RTX
 #include "remix_api_test.h"
+#include "rt_anticull.h"
 #endif
 
 static const D3DFORMAT AdapterFormats[] = {
@@ -327,6 +328,10 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 #ifdef MGE_RTX
 	// Test Remix SDK API availability from 32-bit bridge client
 	RemixAPITest::initialize();
+
+	// Install the RT_AntiCull FrustumCull replacement. Wrapped internally so a failure
+	// leaves the engine unmodified and the game running (heuristic fallback, R7.4/R7.5).
+	RTAntiCull::initialize();
 #endif
 
 	return D3D_OK;

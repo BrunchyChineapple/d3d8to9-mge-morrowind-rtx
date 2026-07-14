@@ -2,6 +2,8 @@
 
 #ifdef MGE_RTX
 
+#include <cstdint>
+
 struct remixapi_Interface;
 
 namespace RemixAPITest {

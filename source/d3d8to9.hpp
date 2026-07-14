@@ -10,6 +10,15 @@
 #include "d3d8.hpp"
 #include "interface_query.hpp"
 
+#ifdef MGE_RTX
+// Tier 4 near-draw classifier hooks (diagnostics; implemented in d3d8to9_device.cpp).
+// worldInstr_NoteVBWriteLock is called from Direct3DVertexBuffer8::Lock on write locks
+// to detect CPU-skinned/animated meshes (their VBs are re-locked every frame) vs truly
+// static geometry (locked once at load). worldInstr_NextFrame advances the frame id.
+void worldInstr_NoteVBWriteLock(void* vb);
+void worldInstr_NextFrame();
+#endif
+
 class Direct3D8 : public IDirect3D8
 {
 	Direct3D8(const Direct3D8 &) = delete;
@@ -174,6 +183,24 @@ public:
 	bool PaletteFlag = false;
 	bool IsRecordingState = false;
 	bool IsMixedVPModeDevice = false;
+
+#ifdef MGE_RTX
+	// World-static batching instrumentation (Tier 4 scoping). Cheap cached draw state,
+	// read by DrawIndexedPrimitive to classify the near draw stream when the runtime
+	// gate (mge_batch_world.txt) is on. Pure pointer/scalar stores in the Set* overrides
+	// (no extra bridge calls); pure diagnostics, no behaviour change.
+	DWORD dbgCurFVF = 0;                               // active FFP FVF (when no vertex shader)
+	IDirect3DVertexBuffer8 *dbgStream0VB = nullptr;    // stream-0 source VB
+	IDirect3DIndexBuffer8 *dbgIndices = nullptr;       // bound index buffer
+	DWORD dbgAlphaBlend = 0;                           // D3DRS_ALPHABLENDENABLE
+	DWORD dbgAlphaTest = 0;                            // D3DRS_ALPHATESTENABLE
+	// Tier 4 batcher draw state. Stride + stage-0 texture are cached from their setters (reliable
+	// per-draw). Projection / z-write / world transform are NOT cached — they are read live from
+	// the proxy device at draw time (GetTransform/GetRenderState) so they reflect state set via
+	// state blocks, which the per-call setters miss.
+	UINT dbgStream0Stride = 0;                          // stream-0 vertex stride
+	IDirect3DTexture9 *dbgStage0Tex = nullptr;          // stage-0 2D texture (D3D9)
+#endif
 
 	static constexpr size_t MAX_CLIP_PLANES = 6;
 	float StoredClipPlanes[MAX_CLIP_PLANES][4] = {};

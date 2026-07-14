@@ -16,6 +16,7 @@
 // Allow 32-bit usage — the Remix Bridge forwards API calls to the 64-bit server
 #define REMIX_ALLOW_X86
 
+#include "remix_api_test.h"
 #include "support/log.h"
 #include <d3d9.h>
 
@@ -57,8 +58,12 @@ bool initialize() {
     LOG::logline("RemixAPI:   CreateLight = %p", g_remix.CreateLight);
     LOG::logline("RemixAPI:   DrawLightInstance = %p", g_remix.DrawLightInstance);
     LOG::logline("RemixAPI:   SetConfigVariable = %p", g_remix.SetConfigVariable);
+    // Batched mesh + texture-hash entry points used by the live static batcher.
+    LOG::logline("RemixAPI:   CreateMeshBatched = %p", g_remix.CreateMeshBatched);
+    LOG::logline("RemixAPI:   dxvk_GetTextureHash = %p", g_remix.dxvk_GetTextureHash);
 
     g_initialized = true;
+
     return true;
 }
 
