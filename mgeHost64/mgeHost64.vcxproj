@@ -161,6 +161,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\MGE-XE\src\ipc\bridge.h" />
+    <ClInclude Include="..\MGE-XE\src\ipc\retainedcatalog.h" />
     <ClInclude Include="..\MGE-XE\src\ipc\dlshare.h" />
     <ClInclude Include="..\MGE-XE\src\ipc\server.h" />
     <ClInclude Include="..\MGE-XE\src\ipc\vec.h" />
