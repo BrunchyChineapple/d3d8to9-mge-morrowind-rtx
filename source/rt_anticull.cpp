@@ -56,7 +56,7 @@ Config::Config() {
     tiers[1] = SubmissionTier{ 1, TierKind::Conditional, 0.0f, 0.0f,
         Bounds::TierRangeDefault, Bounds::MinConditionalResubmitInterval };
     tiers[2] = SubmissionTier{ 2, TierKind::Far,         0.0f, FLT_MAX,
-        Bounds::TierRangeMin, Bounds::DefaultRetentionWindow };
+        Bounds::TierRangeMin, Bounds::MinConditionalResubmitInterval };
     applyRangeToTiers(*this, activeRange);
 }
 
@@ -145,7 +145,8 @@ const SubmissionTier& assignTier(const Config& cfg, float distSquared) {
     // band; if none exists, a static catch-all FAR keeps the contract.
     if (bestFarIdx >= 0) return cfg.tiers[bestFarIdx];
     static const SubmissionTier kFarFallback{
-        -1, TierKind::Far, 0.0f, FLT_MAX, Bounds::TierRangeMin, Bounds::DefaultRetentionWindow };
+        -1, TierKind::Far, 0.0f, FLT_MAX, Bounds::TierRangeMin,
+        Bounds::MinConditionalResubmitInterval };
     return kFarFallback;
 }
 
@@ -350,12 +351,10 @@ inline bool inFrustum(void* node, void* ctx) {
 
 // Stateless resubmission cadence (rt_anticull/resubmission.py, R3/R6).
 //
-// Off-screen geometry kept by RT_AntiCull does not need re-submission every frame: Remix's
-// instance-retention window (N=4) keeps an instance alive for N frames after its last
-// submission, so re-submitting every `interval` frames (interval <= N) is enough to prevent
-// a lapse. Thinning off-screen submissions this way is the primary cost lever — in-frustum
-// (F) and NEAR geometry are never thinned (they take the early-keep paths before this is
-// consulted).
+// The effective interval is clamped to Remix's instance-retention window so a kept instance
+// cannot lapse. NVIDIA's one-frame default therefore submits every kept off-screen subtree
+// every frame. If a future build raises the retention window, the configured tier interval
+// automatically restores staggered submissions without changing this path.
 //
 // This is STATELESS: instead of a per-node hashmap of last-submitted frames (which would put
 // allocation + the item-C pointer-reuse/generation-guard problem on the hot recursive cull
