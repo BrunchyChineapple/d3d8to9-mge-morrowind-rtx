@@ -57,13 +57,13 @@
 #define REMIXAPI_VERSION_GET_PATCH(version) (((uint64_t)(version)      ) & (uint64_t)0xFFFF)
 
 // Remix Plus carries its own ABI line, distinct from stock NVIDIA dxvk-remix
-// (which is 0.6.x). The reserved MINOR (1000) marks this fork and, because the
-// compat check treats every minor as breaking while MAJOR==0, makes the runtime
-// reject binaries built against stock Remix 0.6.x or older Remix Plus 0.6.x —
-// the struct layout and category-bit ABI differ. Bump MINOR again on any
-// further breaking ABI change.
+// (which is 0.6.x). The reserved MINOR range (starting at 1000) marks this fork
+// and, because the compat check treats every minor as breaking while MAJOR==0,
+// makes the runtime reject binaries built against stock Remix 0.6.x or older
+// Remix Plus ABIs whose struct layout and category bits differ. Bump MINOR on
+// every breaking ABI change.
 #define REMIXAPI_VERSION_MAJOR 0
-#define REMIXAPI_VERSION_MINOR 1000
+#define REMIXAPI_VERSION_MINOR 1001
 #define REMIXAPI_VERSION_PATCH 0
 
 
@@ -209,6 +209,7 @@ extern "C" {
   typedef struct remixapi_MeshHandle_T* remixapi_MeshHandle;
   typedef struct remixapi_LightHandle_T* remixapi_LightHandle;
   typedef struct remixapi_TextureHandle_T* remixapi_TextureHandle;
+  typedef struct remixapi_InstanceHandle_T* remixapi_InstanceHandle;
 
   typedef const wchar_t* remixapi_Path;
 
@@ -591,6 +592,21 @@ extern "C" {
 
   typedef remixapi_ErrorCode(REMIXAPI_PTR* PFN_remixapi_DrawInstance)(
     const remixapi_InstanceInfo* info);
+
+  // Registers an instance whose lifetime is explicitly owned by the caller.
+  // Retained instances are submitted internally every frame before scene GC;
+  // callers update or destroy them only when cell content changes.
+  typedef remixapi_ErrorCode(REMIXAPI_PTR* PFN_remixapi_CreateRetainedInstance)(
+    uint64_t                     identity,
+    const remixapi_InstanceInfo* info,
+    remixapi_InstanceHandle*     out_handle);
+
+  typedef remixapi_ErrorCode(REMIXAPI_PTR* PFN_remixapi_UpdateRetainedInstance)(
+    remixapi_InstanceHandle      handle,
+    const remixapi_InstanceInfo* info);
+
+  typedef remixapi_ErrorCode(REMIXAPI_PTR* PFN_remixapi_DestroyRetainedInstance)(
+    remixapi_InstanceHandle      handle);
 
 
   typedef struct remixapi_LightInfoLightShaping {
@@ -1054,6 +1070,11 @@ extern "C" {
     PFN_remixapi_GetVramStats               GetVramStats;
     PFN_remixapi_RequestTextureVramFree     RequestTextureVramFree;
     PFN_remixapi_GetGameValue               GetGameValue;
+
+    // Explicit-lifetime external geometry. Append-only ABI slots (v0.1001.0).
+    PFN_remixapi_CreateRetainedInstance     CreateRetainedInstance;
+    PFN_remixapi_UpdateRetainedInstance     UpdateRetainedInstance;
+    PFN_remixapi_DestroyRetainedInstance    DestroyRetainedInstance;
   } remixapi_Interface;
 
   REMIXAPI remixapi_ErrorCode REMIXAPI_CALL remixapi_InitializeLibrary(

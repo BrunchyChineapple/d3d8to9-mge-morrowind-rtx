@@ -61,6 +61,9 @@ bool initialize() {
     // Batched mesh + texture-hash entry points used by the live static batcher.
     LOG::logline("RemixAPI:   CreateMeshBatched = %p", g_remix.CreateMeshBatched);
     LOG::logline("RemixAPI:   dxvk_GetTextureHash = %p", g_remix.dxvk_GetTextureHash);
+    LOG::logline("RemixAPI:   CreateRetainedInstance = %p", g_remix.CreateRetainedInstance);
+    LOG::logline("RemixAPI:   UpdateRetainedInstance = %p", g_remix.UpdateRetainedInstance);
+    LOG::logline("RemixAPI:   DestroyRetainedInstance = %p", g_remix.DestroyRetainedInstance);
 
     g_initialized = true;
 
@@ -69,6 +72,13 @@ bool initialize() {
 
 bool isInitialized() {
     return g_initialized;
+}
+
+bool supportsRetainedInstances() {
+    return g_initialized &&
+        g_remix.CreateRetainedInstance &&
+        g_remix.UpdateRetainedInstance &&
+        g_remix.DestroyRetainedInstance;
 }
 
 remixapi_Interface* getInterface() {
