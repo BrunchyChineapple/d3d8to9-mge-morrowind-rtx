@@ -101,7 +101,7 @@ namespace Bounds {
     // the way down. At the default range 8192 this yields exactly the legacy NEAR [0,4096).
     constexpr int NearShellMaxWidth = 4096;
 
-    constexpr int DefaultRetentionWindow = 1; // NVIDIA defaults; no Remix getter; R6.5
+    constexpr int DefaultRetentionWindow = 4; // wrapper-owned N (no Remix getter); R6.5
 
     constexpr int NearResubmitInterval           = 1;
     constexpr int MinConditionalResubmitInterval = 2;
@@ -113,7 +113,7 @@ struct SubmissionTier {
     float    nearDist;        // band lower bound, inclusive (world units)
     float    farDist;         // band upper bound, exclusive (FLT_MAX for FAR)
     int      range;           // RT_Reachability_Range, clamped [4096, 131072] (R4.4)
-    int      resubmitInterval; // configured cadence; effective interval is min(value, N)
+    int      resubmitInterval; // NEAR=1; others in [2, N], non-decreasing by distance
 };
 
 constexpr int kMaxTiers = 8;
