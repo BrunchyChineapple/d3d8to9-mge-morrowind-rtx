@@ -8,6 +8,8 @@
 #ifdef MGE_RTX
 #include "remix_api_test.h"
 #include "rt_anticull.h"
+
+void waitForRetainedDeviceRelease();
 #endif
 
 static const D3DFORMAT AdapterFormats[] = {
@@ -254,6 +256,11 @@ HRESULT STDMETHODCALLTYPE Direct3D8::CreateDevice(UINT Adapter, D3DDEVTYPE Devic
 	// Create device in the same manner as the proxy
 	IDirect3DDevice9 *DeviceInterface = nullptr;
 
+	// A deferred retained teardown owns the old fullscreen device. Wait before
+	// asking D3D9 to create its replacement, not after wrapper construction.
+#ifdef MGE_RTX
+	waitForRetainedDeviceRelease();
+#endif
 	const HRESULT hr = ProxyInterface->CreateDevice(Adapter, DeviceType, hFocusWindow, BehaviorFlags, &pp, &DeviceInterface);
 	if (FAILED(hr))
 		return hr;

@@ -76,6 +76,12 @@ bool isInitialized() {
 
 bool supportsRetainedInstances() {
     return g_initialized &&
+        g_remix.CreateMaterial &&
+        g_remix.DestroyMaterial &&
+        g_remix.CreateMesh &&
+        g_remix.DestroyMesh &&
+        g_remix.SetupCamera &&
+        g_remix.dxvk_GetTextureHash &&
         g_remix.CreateRetainedInstance &&
         g_remix.UpdateRetainedInstance &&
         g_remix.DestroyRetainedInstance;
