@@ -1932,6 +1932,7 @@ bool RetainedWorldManager::commitCell(
         info.transform.matrix[1][1] = 1.0f;
         info.transform.matrix[2][2] = 1.0f;
         info.transform.matrix[2][3] = -40.0f;
+        info.doubleSided = 1;
         const auto identity = domainIdentity(mesh.identity, 0x5445525241494e49ull);
         if (!createInstance(identity, info, mesh.identity)) {
             rollbackCell(key);
