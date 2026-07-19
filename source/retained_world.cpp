@@ -5,19 +5,26 @@
 #endif
 
 #include "retained_world.h"
+#include "legacy_geometry_hash.h"
 
 #include "ipc/client.h"
 #include "ipc/retainedcatalog.h"
 #include "mge/compositecache.h"
+#include "dlcull_config.h"
 #include "remix_api_test.h"
 #include "remix_c.h"
 #include "support/log.h"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -32,18 +39,200 @@ constexpr std::uint32_t kMaxCatalogCells = 65536;
 constexpr std::uint32_t kMaxCatalogMeshes = 262144;
 constexpr std::uint32_t kMaxCatalogPlacements = 1000000;
 constexpr std::uint32_t kMaxCatalogBlobBytes = 512u * 1024u * 1024u;
-constexpr std::uint64_t kResourceBudgetBytes = 512ull * 1024ull * 1024ull;
-constexpr std::uint64_t kTransitionResourceBudgetBytes = 1024ull * 1024ull * 1024ull;
+constexpr std::uint64_t kBytesPerMiB = 1024ull * 1024ull;
+constexpr std::uint32_t kDefaultCellRadius = 2;
+constexpr std::uint32_t kMaxCellRadius = 10;
+constexpr std::uint32_t kMaxLegacyDrawDistanceCells = 300;
+constexpr std::uint32_t kDefaultMeshBudgetMB = 512;
+constexpr std::uint32_t kDefaultTransitionBudgetMB = 1024;
+constexpr std::uint32_t kDefaultCompositeBudgetMB = 0;
+constexpr std::uint32_t kDefaultCommitsPerFrame = 2;
+constexpr std::uint32_t kDefaultEvictionsPerFrame = 2;
+constexpr std::uint32_t kMinMeshBudgetMB = 128;
+constexpr std::uint32_t kMaxMeshBudgetMB = 2048;
+constexpr std::uint32_t kMaxTransitionBudgetMB = 3072;
+constexpr std::uint32_t kMinCompositeBudgetMB = 16;
+constexpr std::uint32_t kMaxCompositeBudgetMB = 1024;
+constexpr std::uint32_t kMaxCellChangesPerFrame = 8;
+constexpr std::uint32_t kRequiredSettingsMask = (1u << 6) - 1;
 constexpr std::uint32_t kCatalogRetryFrames = 60;
 constexpr std::uint32_t kCatalogRefreshFrames = 300;
+constexpr std::uint64_t kSettingsPollIntervalMs = 500;
 constexpr float kCellSize = 8192.0f;
 constexpr float kCellHysteresis = 512.0f;
-constexpr float kDirectionHysteresis = 0.25f;
 constexpr std::uint32_t kAllowedMeshFlags =
     RetainedCatalog::MeshFlagHasAlpha |
     RetainedCatalog::MeshFlagAnimatedUv |
     RetainedCatalog::MeshFlagIndex32 |
     RetainedCatalog::MeshFlagCompositeDxt1;
+
+struct RetainedWorldSettings {
+    std::uint32_t radius = kDefaultCellRadius;
+    std::uint32_t meshBudgetMB = kDefaultMeshBudgetMB;
+    std::uint32_t transitionBudgetMB = kDefaultTransitionBudgetMB;
+    std::uint32_t compositeBudgetMB = kDefaultCompositeBudgetMB;
+    std::uint32_t commitsPerFrame = kDefaultCommitsPerFrame;
+    std::uint32_t evictionsPerFrame = kDefaultEvictionsPerFrame;
+
+    std::uint64_t meshBudgetBytes() const {
+        return static_cast<std::uint64_t>(meshBudgetMB) * kBytesPerMiB;
+    }
+
+    std::uint64_t transitionBudgetBytes() const {
+        return static_cast<std::uint64_t>(transitionBudgetMB) * kBytesPerMiB;
+    }
+
+    bool operator==(const RetainedWorldSettings& other) const {
+        return radius == other.radius &&
+            meshBudgetMB == other.meshBudgetMB &&
+            transitionBudgetMB == other.transitionBudgetMB &&
+            compositeBudgetMB == other.compositeBudgetMB &&
+            commitsPerFrame == other.commitsPerFrame &&
+            evictionsPerFrame == other.evictionsPerFrame;
+    }
+};
+
+bool parseUnsignedSetting(const char* text, std::uint32_t& value) {
+    if (!text || *text == '\0' || *text == '-') {
+        return false;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(text, &end, 10);
+    if (errno == ERANGE || end == text || *end != '\0' ||
+        parsed > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    value = static_cast<std::uint32_t>(parsed);
+    return true;
+}
+
+void logRetainedWorldSettings(
+    const char* action,
+    const RetainedWorldSettings& settings) {
+    if (settings.compositeBudgetMB == 0) {
+        LOG::logline(
+            "RetainedWorld: %s radius=%u mesh=%u MiB transition=%u MiB composite=auto commits=%u evictions=%u",
+            action,
+            settings.radius,
+            settings.meshBudgetMB,
+            settings.transitionBudgetMB,
+            settings.commitsPerFrame,
+            settings.evictionsPerFrame);
+    } else {
+        LOG::logline(
+            "RetainedWorld: %s radius=%u mesh=%u MiB transition=%u MiB composite=%u MiB commits=%u evictions=%u",
+            action,
+            settings.radius,
+            settings.meshBudgetMB,
+            settings.transitionBudgetMB,
+            settings.compositeBudgetMB,
+            settings.commitsPerFrame,
+            settings.evictionsPerFrame);
+    }
+}
+
+bool loadRetainedWorldSettings(
+    RetainedWorldSettings& result,
+    bool logInvalid) {
+    RetainedWorldSettings settings;
+    FILE* file = nullptr;
+    if (fopen_s(&file, "mge_retained_world.cfg", "r") != 0 || !file) {
+        return false;
+    }
+
+    std::uint32_t settingsMask = 0;
+    char line[256] = {};
+    while (std::fgets(line, sizeof(line), file)) {
+        const std::size_t lineLength = std::strlen(line);
+        if (lineLength == sizeof(line) - 1 && line[lineLength - 1] != '\n') {
+            if (logInvalid) {
+                LOG::logline("RetainedWorld: rejected overlong config line");
+            }
+            std::fclose(file);
+            return false;
+        }
+
+        char key[64] = {};
+        char text[64] = {};
+        char extra[64] = {};
+        const int fields = sscanf_s(
+            line, "%63s %63s %63s",
+            key, static_cast<unsigned>(sizeof(key)),
+            text, static_cast<unsigned>(sizeof(text)),
+            extra, static_cast<unsigned>(sizeof(extra)));
+        if (fields <= 0 || key[0] == '#') {
+            continue;
+        }
+
+        std::uint32_t* destination = nullptr;
+        std::uint32_t settingBit = 0;
+        if (_stricmp(key, "radius") == 0) {
+            destination = &settings.radius;
+            settingBit = 1u << 0;
+        } else if (_stricmp(key, "mesh_budget_mb") == 0) {
+            destination = &settings.meshBudgetMB;
+            settingBit = 1u << 1;
+        } else if (_stricmp(key, "transition_budget_mb") == 0) {
+            destination = &settings.transitionBudgetMB;
+            settingBit = 1u << 2;
+        } else if (_stricmp(key, "composite_budget_mb") == 0) {
+            destination = &settings.compositeBudgetMB;
+            settingBit = 1u << 3;
+        } else if (_stricmp(key, "commits_per_frame") == 0) {
+            destination = &settings.commitsPerFrame;
+            settingBit = 1u << 4;
+        } else if (_stricmp(key, "evictions_per_frame") == 0) {
+            destination = &settings.evictionsPerFrame;
+            settingBit = 1u << 5;
+        }
+        if (!destination) {
+            continue;
+        }
+
+        const bool hasValidSuffix = fields == 2 ||
+            (fields == 3 && extra[0] == '#');
+        std::uint32_t value = 0;
+        if (!hasValidSuffix || !parseUnsignedSetting(text, value) ||
+            (settingsMask & settingBit) != 0) {
+            if (logInvalid) {
+                LOG::logline(
+                    "RetainedWorld: rejected malformed or duplicate setting '%s'",
+                    key);
+            }
+            std::fclose(file);
+            return false;
+        }
+        *destination = value;
+        settingsMask |= settingBit;
+    }
+    const bool readFailed = std::ferror(file) != 0;
+    std::fclose(file);
+    if (readFailed || settingsMask != kRequiredSettingsMask) {
+        return false;
+    }
+
+    settings.radius = std::clamp(settings.radius, 1u, kMaxCellRadius);
+    settings.meshBudgetMB = std::clamp(
+        settings.meshBudgetMB, kMinMeshBudgetMB, kMaxMeshBudgetMB);
+    settings.transitionBudgetMB = std::clamp(
+        settings.transitionBudgetMB,
+        settings.meshBudgetMB,
+        kMaxTransitionBudgetMB);
+    if (settings.compositeBudgetMB != 0) {
+        settings.compositeBudgetMB = std::clamp(
+            settings.compositeBudgetMB,
+            kMinCompositeBudgetMB,
+            kMaxCompositeBudgetMB);
+    }
+    settings.commitsPerFrame = std::clamp(
+        settings.commitsPerFrame, 1u, kMaxCellChangesPerFrame);
+    settings.evictionsPerFrame = std::clamp(
+        settings.evictionsPerFrame, 1u, kMaxCellChangesPerFrame);
+
+    result = settings;
+    return true;
+}
 
 struct CellKey {
     std::int32_t x = 0;
@@ -92,6 +281,7 @@ struct CatalogSnapshot {
 
 struct MaterialResource {
     remixapi_MaterialHandle handle = nullptr;
+    std::uint64_t legacyTextureHash = 0;
     ResidentCompositeCache* compositeCache = nullptr;
     CellId compositeCell = {};
     bool hasCompositeLease = false;
@@ -116,6 +306,24 @@ struct CellRuntime {
     std::vector<InstanceResource> instances;
     std::vector<std::uint64_t> meshes;
 };
+
+bool isRetainedCellActive(const CellRuntime& runtime) {
+    return runtime.state != CellState::Absent ||
+        !runtime.instances.empty() || !runtime.meshes.empty();
+}
+
+std::size_t countObsoleteCells(
+    const std::unordered_map<CellKey, CellRuntime, CellKeyHash>& cells,
+    const std::unordered_set<CellKey, CellKeyHash>& desired) {
+    std::size_t count = 0;
+    for (const auto& entry : cells) {
+        if (isRetainedCellActive(entry.second) &&
+            desired.find(entry.first) == desired.end()) {
+            ++count;
+        }
+    }
+    return count;
+}
 
 std::uint64_t hashBytes(
     const void* data,
@@ -180,7 +388,7 @@ float halfToFloat(std::uint16_t value) {
     return converted;
 }
 
-std::wstring widenPath(const std::uint8_t* bytes, std::uint32_t byteCount) {
+std::string decodePath(const std::uint8_t* bytes, std::uint32_t byteCount) {
     if (!bytes || byteCount == 0) {
         return {};
     }
@@ -194,27 +402,13 @@ std::wstring widenPath(const std::uint8_t* bytes, std::uint32_t byteCount) {
         }
         --encodedBytes;
     }
-    if (encodedBytes == 0 ||
-        encodedBytes > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+    if (encodedBytes == 0) {
         return {};
     }
 
-    const int inputBytes = static_cast<int>(encodedBytes);
-    const int chars = MultiByteToWideChar(
-        CP_ACP, MB_ERR_INVALID_CHARS,
+    return std::string(
         reinterpret_cast<const char*>(bytes),
-        inputBytes, nullptr, 0);
-    if (chars <= 0) {
-        return {};
-    }
-    std::wstring result(static_cast<std::size_t>(chars), L'\0');
-    if (MultiByteToWideChar(
-            CP_ACP, MB_ERR_INVALID_CHARS,
-            reinterpret_cast<const char*>(bytes),
-            inputBytes, result.data(), chars) != chars) {
-        return {};
-    }
-    return result;
+        static_cast<std::size_t>(encodedBytes));
 }
 
 class RetainedWorldManager {
@@ -230,7 +424,8 @@ public:
         const D3DXMATRIX& view,
         const D3DXMATRIX& projection,
         float nearPlane,
-        float farPlane);
+        float farPlane,
+        bool exterior);
     void prepareCompositeTransition(
         const D3DXVECTOR4& eye,
         const D3DXMATRIX& view,
@@ -248,30 +443,18 @@ public:
 private:
     bool allocateCatalogVectors(IPC::Client& client);
     bool releaseCatalogVectors();
-    bool requestCatalog(CatalogSnapshot& result);
+    bool requestCatalog(CatalogSnapshot& result, bool& unchanged);
     bool validateCatalog(CatalogSnapshot& candidate) const;
     bool canCommitCell(CellKey key, ResidentCompositeCache& composites) const;
-    bool calculateTargetResourceBytes(
-        const std::vector<CellKey>& target,
-        std::uint64_t& finalBytes,
-        std::uint64_t& stagingBytes) const;
-    bool targetFitsFinalBudget(const std::vector<CellKey>& target) const;
-    bool targetFitsCompositeBudget(
-        const std::vector<CellKey>& target,
-        const ResidentCompositeCache& composites) const;
-    bool canStageTarget(
-        const std::vector<CellKey>& target,
-        ResidentCompositeCache& composites) const;
     bool commitCell(CellKey key, ResidentCompositeCache& composites);
     bool rollbackCell(CellKey key);
     bool evictCell(CellKey key);
     bool teardownCells();
     void clearCatalog();
-    std::vector<CellKey> chooseTargetCells(
-        const D3DXVECTOR4& eye,
-        const D3DXMATRIX& view);
+    void pollSettings();
+    float committedDrawDistanceCells(const D3DXVECTOR4& eye) const;
+    const std::vector<CellKey>& chooseTargetCells(const D3DXVECTOR4& eye);
     CellKey chooseAnchor(const D3DXVECTOR4& eye);
-    bool chooseNeighbor(CellKey anchor, const D3DXMATRIX& view, CellKey& neighbor);
     bool acquireMesh(
         const RetainedCatalog::Mesh& mesh,
         ResidentCompositeCache* composites,
@@ -299,14 +482,24 @@ private:
     bool catalogAttempted_ = false;
     bool catalogRefreshRequested_ = false;
     bool anchorValid_ = false;
-    bool neighborValid_ = false;
+    bool targetValid_ = false;
+    bool admissionDeferred_ = false;
     std::uint32_t catalogRetryCounter_ = 0;
     std::uint32_t refreshCounter_ = 0;
+    std::uint64_t nextSettingsPollMs_ = 0;
     IPC::Client* client_ = nullptr;
     IDirect3DDevice9* device_ = nullptr;
     std::string worldspaceKey_;
     CellKey anchor_ = {};
-    CellKey neighbor_ = {};
+    CellKey targetAnchor_ = {};
+    std::uint32_t targetRadius_ = 0;
+    std::uint32_t targetInnerRadius_ = 0;
+    std::uint64_t targetResourceBytes_ = 0;
+    std::uint64_t targetCompositeBytes_ = 0;
+    std::uint32_t targetCompositeBudgetMB_ = 64;
+    float cameraDrawDistanceCells_ = 1.0f;
+    RetainedWorldSettings settings_;
+    std::vector<CellKey> targetCells_;
 
     IPC::VecId headerId_ = IPC::InvalidVector;
     IPC::VecId cellsId_ = IPC::InvalidVector;
@@ -337,6 +530,20 @@ bool RetainedWorldManager::initialize(IPC::Client& client, IDirect3DDevice9* dev
     client_ = &client;
     device_ = device;
     deviceReady_ = device != nullptr;
+    settings_ = RetainedWorldSettings{};
+    if (loadRetainedWorldSettings(settings_, true)) {
+        logRetainedWorldSettings("config", settings_);
+    } else {
+        LOG::logline(
+            "RetainedWorld: using defaults (radius=%u, mesh=%u MiB, transition=%u MiB, composite=auto)",
+            settings_.radius,
+            settings_.meshBudgetMB,
+            settings_.transitionBudgetMB);
+    }
+    nextSettingsPollMs_ = 0;
+    targetValid_ = false;
+    admissionDeferred_ = false;
+    cameraDrawDistanceCells_ = 1.0f;
 
     if (!RemixAPITest::supportsRetainedInstances()) {
         initialized_ = false;
@@ -352,6 +559,27 @@ bool RetainedWorldManager::initialize(IPC::Client& client, IDirect3DDevice9* dev
 
     initialized_ = true;
     return true;
+}
+
+void RetainedWorldManager::pollSettings() {
+    if (!initialized_) {
+        return;
+    }
+
+    const auto now = static_cast<std::uint64_t>(GetTickCount64());
+    if (now < nextSettingsPollMs_) {
+        return;
+    }
+    nextSettingsPollMs_ = now + kSettingsPollIntervalMs;
+
+    RetainedWorldSettings candidate;
+    if (!loadRetainedWorldSettings(candidate, false) || candidate == settings_) {
+        return;
+    }
+
+    settings_ = candidate;
+    targetValid_ = false;
+    logRetainedWorldSettings("applied live config", settings_);
 }
 
 bool RetainedWorldManager::allocateCatalogVectors(IPC::Client& client) {
@@ -461,11 +689,26 @@ void copyView(IPC::VecView<T>& source, std::vector<T>& destination) {
     }
 }
 
-bool RetainedWorldManager::requestCatalog(CatalogSnapshot& result) {
+bool RetainedWorldManager::requestCatalog(
+    CatalogSnapshot& result,
+    bool& unchanged) {
     result.clear();
+    unchanged = false;
+    const std::uint64_t knownGeneration =
+        catalogActive_ ? catalog_.header.generation : 0;
     if (!client_ || !client_->getRetainedWorldCatalogBlocking(
-            headerId_, cellsId_, meshesId_, placementsId_, blobId_) ||
-        headerView_.size() != 1) {
+            headerId_, cellsId_, meshesId_, placementsId_, blobId_,
+            knownGeneration, unchanged)) {
+        return false;
+    }
+
+    // The host generation changes on worldspace and dynamic-visibility mutations.
+    // Equal generations leave the previously validated snapshot authoritative and, most
+    // importantly, leave the large shared vectors untouched on the periodic probe path.
+    if (unchanged) {
+        return knownGeneration != 0;
+    }
+    if (headerView_.size() != 1) {
         return false;
     }
 
@@ -521,7 +764,6 @@ bool RetainedWorldManager::validateCatalog(CatalogSnapshot& candidate) const {
             (mesh.flags & ~kAllowedMeshFlags) != 0 ||
             !checkedRange(mesh.vertexOffset, mesh.vertexBytes, candidate.blob.size()) ||
             !checkedRange(mesh.indexOffset, mesh.indexBytes, candidate.blob.size()) ||
-            !checkedRange(mesh.materialOffset, mesh.materialBytes, candidate.blob.size()) ||
             mesh.vertexCount == 0 || mesh.indexCount == 0 ||
             mesh.vertexStride != 20 ||
             !checkedProduct(mesh.vertexCount, mesh.vertexStride, mesh.vertexBytes) ||
@@ -535,16 +777,17 @@ bool RetainedWorldManager::validateCatalog(CatalogSnapshot& candidate) const {
                     (mesh.indexStride == 4) ||
                 (mesh.flags & (RetainedCatalog::MeshFlagHasAlpha |
                                RetainedCatalog::MeshFlagAnimatedUv)) != 0 ||
-                (mesh.materialBytes != 0 &&
-                 ((mesh.flags & RetainedCatalog::MeshFlagCompositeDxt1) == 0 ||
-                  mesh.materialIdentity == 0))) {
+                (mesh.flags & RetainedCatalog::MeshFlagCompositeDxt1) == 0 ||
+                mesh.materialIdentity == 0 || mesh.materialBytes == 0 ||
+                mesh.materialOffset != 0) {
                 return false;
             }
         } else if (mesh.category == RetainedCatalog::Category::Static) {
             if (mesh.indexStride != 2 ||
                 (mesh.flags & (RetainedCatalog::MeshFlagIndex32 |
                                RetainedCatalog::MeshFlagCompositeDxt1)) != 0 ||
-                mesh.materialIdentity == 0 || mesh.materialBytes == 0) {
+                mesh.materialIdentity == 0 || mesh.materialBytes == 0 ||
+                !checkedRange(mesh.materialOffset, mesh.materialBytes, candidate.blob.size())) {
                 return false;
             }
         } else {
@@ -673,9 +916,10 @@ void RetainedWorldManager::selectWorldspace(
     }
 
     CatalogSnapshot candidate;
+    bool unchanged = false;
     catalogAttempted_ = true;
     refreshCounter_ = 0;
-    if (!requestCatalog(candidate)) {
+    if (!requestCatalog(candidate, unchanged)) {
         if (!catalogActive_) {
             catalogRetryCounter_ = kCatalogRetryFrames;
             LOG::logline("RetainedWorld: no valid exterior catalog; legacy rendering active");
@@ -694,6 +938,12 @@ void RetainedWorldManager::selectWorldspace(
         } else {
             LOG::logline("RetainedWorld: periodic catalog refresh failed; preserving active catalog");
         }
+        return;
+    }
+
+    if (unchanged) {
+        catalogRefreshRequested_ = false;
+        catalogRetryCounter_ = 0;
         return;
     }
 
@@ -720,7 +970,7 @@ void RetainedWorldManager::selectWorldspace(
     catalogRefreshRequested_ = false;
     catalogRetryCounter_ = 0;
     anchorValid_ = false;
-    neighborValid_ = false;
+    targetValid_ = false;
     LOG::logline(
         "RetainedWorld: catalog generation %llu validated (%u cells, %u meshes, %u placements)",
         static_cast<unsigned long long>(catalog_.header.generation),
@@ -732,9 +982,40 @@ void RetainedWorldManager::selectWorldspace(
 void RetainedWorldManager::clearCatalog() {
     catalogActive_ = false;
     anchorValid_ = false;
-    neighborValid_ = false;
+    targetValid_ = false;
+    admissionDeferred_ = false;
+    targetRadius_ = 0;
+    targetInnerRadius_ = 0;
+    targetCells_.clear();
+    targetResourceBytes_ = 0;
+    targetCompositeBytes_ = 0;
     catalog_.clear();
     cells_.clear();
+}
+
+float RetainedWorldManager::committedDrawDistanceCells(
+    const D3DXVECTOR4& eye) const {
+    float drawDistanceCells = cameraDrawDistanceCells_;
+    if (!initialized_ || !deviceReady_ || !catalogActive_) {
+        return drawDistanceCells;
+    }
+
+    const CellKey cameraCell{
+        static_cast<std::int32_t>(std::floor(eye.x / kCellSize)),
+        static_cast<std::int32_t>(std::floor(eye.y / kCellSize))
+    };
+    for (const auto& entry : cells_) {
+        if (entry.second.state != CellState::Committed) {
+            continue;
+        }
+        const double dx = static_cast<double>(entry.first.x) - cameraCell.x;
+        const double dy = static_cast<double>(entry.first.y) - cameraCell.y;
+        const double radius = std::ceil(std::sqrt(dx * dx + dy * dy));
+        drawDistanceCells = std::max(
+            drawDistanceCells,
+            static_cast<float>(std::min<double>(radius, kMaxCellRadius)));
+    }
+    return drawDistanceCells;
 }
 
 void RetainedWorldManager::setupCamera(
@@ -742,9 +1023,23 @@ void RetainedWorldManager::setupCamera(
     const D3DXMATRIX& view,
     const D3DXMATRIX& projection,
     float nearPlane,
-    float farPlane) {
+    float farPlane,
+    bool exterior) {
+    pollSettings();
+
+    float retainedFarPlane = farPlane;
+    if (std::isfinite(farPlane) && farPlane > 0.0f) {
+        cameraDrawDistanceCells_ = std::max(1.0f, farPlane / kCellSize);
+        if (exterior) {
+            retainedFarPlane = std::max(
+                farPlane,
+                committedDrawDistanceCells(eye) * kCellSize);
+        }
+    }
+
     auto* api = remix();
-    if (!api || !api->SetupCamera || nearPlane <= 0.0f || farPlane <= nearPlane ||
+    if (!api || !api->SetupCamera || nearPlane <= 0.0f ||
+        !std::isfinite(retainedFarPlane) || retainedFarPlane <= nearPlane ||
         projection._11 == 0.0f || projection._22 == 0.0f) {
         return;
     }
@@ -758,7 +1053,7 @@ void RetainedWorldManager::setupCamera(
     parameters.fovYInDegrees = std::atan(1.0f / projection._22) * 2.0f * 57.2957795131f;
     parameters.aspect = projection._22 / projection._11;
     parameters.nearPlane = nearPlane;
-    parameters.farPlane = farPlane;
+    parameters.farPlane = retainedFarPlane;
 
     remixapi_CameraInfo camera = {};
     camera.sType = REMIXAPI_STRUCT_TYPE_CAMERA_INFO;
@@ -775,6 +1070,10 @@ CellKey RetainedWorldManager::chooseAnchor(const D3DXVECTOR4& eye) {
     if (!anchorValid_) {
         anchor_ = raw;
         anchorValid_ = true;
+        targetValid_ = false;
+        return anchor_;
+    }
+    if (raw == anchor_) {
         return anchor_;
     }
 
@@ -782,7 +1081,7 @@ CellKey RetainedWorldManager::chooseAnchor(const D3DXVECTOR4& eye) {
     const std::int64_t dy = static_cast<std::int64_t>(raw.y) - anchor_.y;
     if (std::abs(dx) + std::abs(dy) != 1) {
         anchor_ = raw;
-        neighborValid_ = false;
+        targetValid_ = false;
         return anchor_;
     }
 
@@ -793,119 +1092,321 @@ CellKey RetainedWorldManager::chooseAnchor(const D3DXVECTOR4& eye) {
     if (dy < 0) crossed = eye.y < anchor_.y * kCellSize - kCellHysteresis;
     if (crossed) {
         anchor_ = raw;
-        neighborValid_ = false;
+        targetValid_ = false;
     }
     return anchor_;
 }
 
-bool RetainedWorldManager::chooseNeighbor(
-    CellKey anchor,
-    const D3DXMATRIX& view,
-    CellKey& neighbor) {
-    const std::array<CellKey, 4> candidates = {{
-        { anchor.x + 1, anchor.y },
-        { anchor.x - 1, anchor.y },
-        { anchor.x, anchor.y + 1 },
-        { anchor.x, anchor.y - 1 },
-    }};
-    const std::array<std::pair<float, float>, 4> directions = {{
-        { 1.0f, 0.0f }, { -1.0f, 0.0f }, { 0.0f, 1.0f }, { 0.0f, -1.0f }
-    }};
-
-    float forwardX = view._13;
-    float forwardY = view._23;
-    const float length = std::sqrt(forwardX * forwardX + forwardY * forwardY);
-    if (length > 1.0e-5f) {
-        forwardX /= length;
-        forwardY /= length;
-    } else {
-        forwardX = 1.0f;
-        forwardY = 0.0f;
+const std::vector<CellKey>& RetainedWorldManager::chooseTargetCells(
+    const D3DXVECTOR4& eye) {
+    const CellKey anchor = chooseAnchor(eye);
+    const auto innerRadius = static_cast<std::uint32_t>(std::clamp(
+        std::ceil(cameraDrawDistanceCells_),
+        1.0f,
+        static_cast<float>(kMaxLegacyDrawDistanceCells)));
+    const std::uint32_t radius = settings_.radius;
+    if (targetValid_ && targetAnchor_ == anchor && targetRadius_ == radius &&
+        targetInnerRadius_ == innerRadius) {
+        return targetCells_;
     }
 
-    int best = -1;
-    float bestScore = -std::numeric_limits<float>::infinity();
-    int previous = -1;
-    for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
-        if (catalog_.cellByKey.find(candidates[i]) == catalog_.cellByKey.end()) {
+    targetValid_ = true;
+    targetAnchor_ = anchor;
+    targetRadius_ = radius;
+    targetInnerRadius_ = innerRadius;
+    targetCells_.clear();
+    targetResourceBytes_ = 0;
+    targetCompositeBytes_ = 0;
+
+    struct Candidate {
+        CellKey key;
+        std::uint32_t distanceSq;
+    };
+
+    std::vector<Candidate> candidates;
+    const int radiusInt = static_cast<int>(radius);
+    candidates.reserve(static_cast<std::size_t>((radiusInt * 2 + 1) * (radiusInt * 2 + 1)));
+    for (int dy = -radiusInt; dy <= radiusInt; ++dy) {
+        for (int dx = -radiusInt; dx <= radiusInt; ++dx) {
+            const auto distanceSq = static_cast<std::uint32_t>(dx * dx + dy * dy);
+            if (distanceSq > radius * radius ||
+                distanceSq <= innerRadius * innerRadius) {
+                continue;
+            }
+            const std::int64_t x = static_cast<std::int64_t>(anchor.x) + dx;
+            const std::int64_t y = static_cast<std::int64_t>(anchor.y) + dy;
+            if (x < std::numeric_limits<std::int32_t>::min() ||
+                x > std::numeric_limits<std::int32_t>::max() ||
+                y < std::numeric_limits<std::int32_t>::min() ||
+                y > std::numeric_limits<std::int32_t>::max()) {
+                continue;
+            }
+            const CellKey key{ static_cast<std::int32_t>(x), static_cast<std::int32_t>(y) };
+            if (catalog_.cellByKey.find(key) != catalog_.cellByKey.end()) {
+                candidates.push_back({ key, distanceSq });
+            }
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.distanceSq != b.distanceSq) {
+            return a.distanceSq < b.distanceSq;
+        }
+        if (a.key.y != b.key.y) {
+            return a.key.y < b.key.y;
+        }
+        return a.key.x < b.key.x;
+    });
+
+    const std::uint64_t meshBudgetBytes = settings_.meshBudgetBytes();
+    const std::uint64_t compositeBudgetBytes =
+        static_cast<std::uint64_t>(
+            settings_.compositeBudgetMB == 0
+                ? kMaxCompositeBudgetMB
+                : settings_.compositeBudgetMB) * kBytesPerMiB;
+    std::unordered_set<std::uint64_t> requiredMeshes;
+    std::uint32_t unsupportedCells = 0;
+    bool budgetLimited = false;
+
+    const auto checkedAdd = [](std::uint64_t& total, std::uint64_t value) {
+        if (total > std::numeric_limits<std::uint64_t>::max() - value) {
+            return false;
+        }
+        total += value;
+        return true;
+    };
+    const auto meshBytes = [&](std::uint64_t identity, std::uint64_t& bytes) {
+        const auto meshIndex = catalog_.meshByIdentity.find(identity);
+        if (meshIndex == catalog_.meshByIdentity.end()) {
+            return false;
+        }
+        const auto& mesh = catalog_.meshes[meshIndex->second];
+        bytes = 0;
+        return checkedAdd(
+                   bytes,
+                   static_cast<std::uint64_t>(mesh.vertexCount) *
+                       sizeof(remixapi_HardcodedVertex)) &&
+               checkedAdd(
+                   bytes,
+                   static_cast<std::uint64_t>(mesh.indexCount) *
+                       sizeof(std::uint32_t));
+    };
+
+    for (const Candidate& candidate : candidates) {
+        const auto catalogCell = catalog_.cellByKey.find(candidate.key);
+        const auto& cell = catalog_.cells[catalogCell->second];
+        std::vector<std::uint64_t> cellMeshes;
+        cellMeshes.reserve(
+            static_cast<std::size_t>(cell.terrainMeshCount) +
+            cell.staticPlacementCount);
+        std::uint64_t cellCompositeBytes = 0;
+        bool retainable = true;
+
+        for (std::uint32_t i = 0; i < cell.terrainMeshCount; ++i) {
+            const auto& mesh = catalog_.meshes[cell.terrainMeshFirst + i];
+            if ((mesh.flags & RetainedCatalog::MeshFlagCompositeDxt1) == 0 ||
+                mesh.materialBytes == 0) {
+                retainable = false;
+                break;
+            }
+            cellMeshes.push_back(mesh.identity);
+            cellCompositeBytes = std::max<std::uint64_t>(
+                cellCompositeBytes, mesh.materialBytes);
+        }
+        if (!retainable) {
+            ++unsupportedCells;
             continue;
         }
-        const float score = forwardX * directions[i].first + forwardY * directions[i].second;
-        if (score > bestScore) {
-            bestScore = score;
-            best = i;
+
+        for (std::uint32_t i = 0; i < cell.staticPlacementCount; ++i) {
+            const auto& placement = catalog_.placements[cell.staticPlacementFirst + i];
+            if ((placement.flags & 1u) == 0) {
+                continue;
+            }
+            const auto meshIndex = catalog_.meshByIdentity.find(placement.prototypeIdentity);
+            if (meshIndex == catalog_.meshByIdentity.end() ||
+                (catalog_.meshes[meshIndex->second].flags &
+                 RetainedCatalog::MeshFlagAnimatedUv) != 0) {
+                retainable = false;
+                break;
+            }
+            cellMeshes.push_back(placement.prototypeIdentity);
         }
-        if (neighborValid_ && candidates[i] == neighbor_) {
-            previous = i;
+        if (!retainable) {
+            ++unsupportedCells;
+            continue;
         }
-    }
-    if (best < 0) {
-        return false;
+
+        std::sort(cellMeshes.begin(), cellMeshes.end());
+        cellMeshes.erase(std::unique(cellMeshes.begin(), cellMeshes.end()), cellMeshes.end());
+        std::uint64_t addedResourceBytes = 0;
+        for (const auto identity : cellMeshes) {
+            if (requiredMeshes.find(identity) != requiredMeshes.end()) {
+                continue;
+            }
+            std::uint64_t bytes = 0;
+            if (!meshBytes(identity, bytes) || !checkedAdd(addedResourceBytes, bytes)) {
+                retainable = false;
+                break;
+            }
+        }
+        if (!retainable) {
+            ++unsupportedCells;
+            continue;
+        }
+
+        if (addedResourceBytes > meshBudgetBytes ||
+            targetResourceBytes_ > meshBudgetBytes - addedResourceBytes ||
+            cellCompositeBytes > compositeBudgetBytes ||
+            targetCompositeBytes_ > compositeBudgetBytes - cellCompositeBytes) {
+            budgetLimited = true;
+            break;
+        }
+
+        targetCells_.push_back(candidate.key);
+        targetResourceBytes_ += addedResourceBytes;
+        targetCompositeBytes_ += cellCompositeBytes;
+        requiredMeshes.insert(cellMeshes.begin(), cellMeshes.end());
     }
 
-    if (previous >= 0) {
-        const float previousScore =
-            forwardX * directions[previous].first + forwardY * directions[previous].second;
-        if (bestScore - previousScore < kDirectionHysteresis) {
-            best = previous;
+    if (settings_.compositeBudgetMB != 0) {
+        targetCompositeBudgetMB_ = settings_.compositeBudgetMB;
+    } else {
+        // Auto mode must cover the complete texture working set: the legacy renderer's
+        // square visible-cell ring plus any retained cells outside that ring. Sizing only
+        // from retained targets left the budget at 64 MiB whenever the retained annulus was
+        // empty, forcing most otherwise-valid composites back to the province atlas.
+        std::unordered_set<CellKey, CellKeyHash> compositeCells;
+        compositeCells.reserve(catalog_.cellByKey.size());
+        for (const auto& entry : catalog_.cellByKey) {
+            const std::int64_t dx =
+                static_cast<std::int64_t>(entry.first.x) - anchor.x;
+            const std::int64_t dy =
+                static_cast<std::int64_t>(entry.first.y) - anchor.y;
+            if (std::abs(dx) <= innerRadius && std::abs(dy) <= innerRadius) {
+                compositeCells.insert(entry.first);
+            }
         }
+        compositeCells.insert(targetCells_.begin(), targetCells_.end());
+
+        std::uint64_t visibleCompositeBytes = 0;
+        for (const CellKey key : compositeCells) {
+            const auto catalogCell = catalog_.cellByKey.find(key);
+            if (catalogCell == catalog_.cellByKey.end()) {
+                continue;
+            }
+            const auto& cell = catalog_.cells[catalogCell->second];
+            std::uint64_t cellCompositeBytes = 0;
+            for (std::uint32_t i = 0; i < cell.terrainMeshCount; ++i) {
+                cellCompositeBytes = std::max<std::uint64_t>(
+                    cellCompositeBytes,
+                    catalog_.meshes[cell.terrainMeshFirst + i].materialBytes);
+            }
+            if (cellCompositeBytes >
+                std::numeric_limits<std::uint64_t>::max() - visibleCompositeBytes) {
+                visibleCompositeBytes = std::numeric_limits<std::uint64_t>::max();
+                break;
+            }
+            visibleCompositeBytes += cellCompositeBytes;
+        }
+
+        const std::uint64_t roundedMB =
+            visibleCompositeBytes >
+                    std::numeric_limits<std::uint64_t>::max() - (kBytesPerMiB - 1)
+                ? std::numeric_limits<std::uint64_t>::max()
+                : (visibleCompositeBytes + kBytesPerMiB - 1) / kBytesPerMiB;
+        targetCompositeBudgetMB_ = static_cast<std::uint32_t>(std::clamp<std::uint64_t>(
+            std::max<std::uint64_t>(64, roundedMB),
+            kMinCompositeBudgetMB,
+            kMaxCompositeBudgetMB));
     }
 
-    neighbor = candidates[best];
-    neighbor_ = neighbor;
-    neighborValid_ = true;
-    return true;
-}
-
-std::vector<CellKey> RetainedWorldManager::chooseTargetCells(
-    const D3DXVECTOR4& eye,
-    const D3DXMATRIX& view) {
-    std::vector<CellKey> target;
-    const CellKey anchor = chooseAnchor(eye);
-    if (catalog_.cellByKey.find(anchor) == catalog_.cellByKey.end()) {
-        return target;
-    }
-    target.push_back(anchor);
-    CellKey neighbor;
-    if (!chooseNeighbor(anchor, view, neighbor)) {
-        target.clear();
-        return target;
-    }
-    target.push_back(neighbor);
-    return target;
+    LOG::logline(
+        "RetainedWorld: target anchor=(%d,%d) inner=%u outer=%u selected %u/%u cells (%u unsupported%s), mesh %llu/%u MiB, composites %llu/%u MiB",
+        anchor.x,
+        anchor.y,
+        innerRadius,
+        radius,
+        static_cast<unsigned>(targetCells_.size()),
+        static_cast<unsigned>(candidates.size()),
+        unsupportedCells,
+        budgetLimited ? ", budget-limited" : "",
+        static_cast<unsigned long long>((targetResourceBytes_ + kBytesPerMiB - 1) / kBytesPerMiB),
+        settings_.meshBudgetMB,
+        static_cast<unsigned long long>((targetCompositeBytes_ + kBytesPerMiB - 1) / kBytesPerMiB),
+        targetCompositeBudgetMB_);
+    return targetCells_;
 }
 
 void RetainedWorldManager::prepareCompositeTransition(
     const D3DXVECTOR4& eye,
     const D3DXMATRIX& view,
     ResidentCompositeCache& composites) {
+    (void)view;
     VisibleCellSet transitionTargets;
     if (initialized_ && deviceReady_ && catalogActive_ && !catalogRefreshRequested_) {
-        const auto target = chooseTargetCells(eye, view);
-        if (target.size() == 2 && targetFitsCompositeBudget(target, composites)) {
-            std::unordered_set<CellKey, CellKeyHash> desired(target.begin(), target.end());
-            std::size_t missingComposites = 0;
-            for (const auto key : target) {
-                const CellId cell{ key.x, key.y };
-                transitionTargets.insert(cell);
-                if (composites.lookup(cell) == nullptr) {
-                    ++missingComposites;
-                }
-            }
+        const auto& target = chooseTargetCells(eye);
+        composites.setBudgetMB(targetCompositeBudgetMB_);
+        std::unordered_set<CellKey, CellKeyHash> desired(target.begin(), target.end());
 
-            bool hasObsoleteCell = false;
-            for (const auto& entry : cells_) {
-                if ((entry.second.state != CellState::Absent ||
-                     !entry.second.instances.empty() || !entry.second.meshes.empty()) &&
-                    desired.find(entry.first) == desired.end()) {
-                    hasObsoleteCell = true;
-                    break;
-                }
+        std::vector<CellKey> obsolete;
+        for (const auto& entry : cells_) {
+            if (isRetainedCellActive(entry.second) &&
+                desired.find(entry.first) == desired.end()) {
+                obsolete.push_back(entry.first);
             }
-            if (missingComposites > 1 && hasObsoleteCell && !teardownCells()) {
-                LOG::logline("RetainedWorld: disjoint transition teardown incomplete; retaining legacy rendering");
-                transitionTargets.clear();
+        }
+        std::sort(obsolete.begin(), obsolete.end(), [this](CellKey a, CellKey b) {
+            const auto distanceSq = [this](CellKey key) {
+                const std::int64_t dx = static_cast<std::int64_t>(key.x) - anchor_.x;
+                const std::int64_t dy = static_cast<std::int64_t>(key.y) - anchor_.y;
+                return dx * dx + dy * dy;
+            };
+            const auto aDistance = distanceSq(a);
+            const auto bDistance = distanceSq(b);
+            if (aDistance != bDistance) {
+                return aDistance > bDistance;
             }
+            if (a.y != b.y) {
+                return a.y < b.y;
+            }
+            return a.x < b.x;
+        });
+
+        bool evictionSucceeded = true;
+        std::uint32_t evicted = 0;
+        for (const auto key : obsolete) {
+            if (evicted >= settings_.evictionsPerFrame) {
+                break;
+            }
+            if (!evictCell(key)) {
+                evictionSucceeded = false;
+                break;
+            }
+            ++evicted;
+        }
+
+        const std::size_t pendingObsolete = countObsoleteCells(cells_, desired);
+        if (evictionSucceeded && pendingObsolete == 0) {
+            if (admissionDeferred_) {
+                LOG::logline(
+                    "RetainedWorld: target admission ready (targets=%u, obsolete_pending=0)",
+                    static_cast<unsigned>(target.size()));
+            }
+            admissionDeferred_ = false;
+            transitionTargets.reserve(target.size());
+            for (const auto key : target) {
+                transitionTargets.insert(CellId{ key.x, key.y });
+            }
+        } else {
+            if (!admissionDeferred_) {
+                LOG::logline(
+                    "RetainedWorld: target admission deferred (targets=%u, obsolete_pending=%u, evicted=%u, destroy_ok=%u)",
+                    static_cast<unsigned>(target.size()),
+                    static_cast<unsigned>(pendingObsolete),
+                    evicted,
+                    evictionSucceeded ? 1u : 0u);
+            }
+            admissionDeferred_ = true;
         }
     }
     composites.setTransitionTargets(transitionTargets);
@@ -952,10 +1453,13 @@ bool RetainedWorldManager::transcodeMesh(
             vertex.normal[0] = (source[16] / 255.0f) * 2.0f - 1.0f;
             vertex.normal[1] = (source[17] / 255.0f) * 2.0f - 1.0f;
             vertex.normal[2] = (source[18] / 255.0f) * 2.0f - 1.0f;
-            float u = (vertex.position[0] - cellMinX) / kCellSize;
-            float v = (vertex.position[1] - cellMinY) / kCellSize;
-            u -= std::floor(u);
-            v -= std::floor(v);
+            // Preserve the closed [0,1] cell domain. Exact far-edge vertices are common in the
+            // generated mesh; modulo wrapping maps their 1.0 coordinate to 0.0 and makes each
+            // boundary triangle interpolate backward across almost the entire composite.
+            const float u = std::clamp(
+                (vertex.position[0] - cellMinX) / kCellSize, 0.0f, 1.0f);
+            const float v = std::clamp(
+                (vertex.position[1] - cellMinY) / kCellSize, 0.0f, 1.0f);
             vertex.texcoord[0] = u;
             vertex.texcoord[1] = 1.0f - v;
             vertex.color = 0xffffffffu;
@@ -990,40 +1494,60 @@ bool RetainedWorldManager::createMaterial(
         return false;
     }
 
-    IDirect3DTexture9* terrainTexture = nullptr;
     bool hasCompositeLease = false;
-    std::wstring albedoPath;
+    std::uint64_t textureHash = 0;
     std::array<wchar_t, 24> textureHashPath = {};
-    std::uint64_t materialHash = mesh.materialIdentity;
     if (mesh.category == RetainedCatalog::Category::Terrain) {
         if (!composites) {
             return false;
         }
-        terrainTexture = composites->pin(terrainCell);
+        auto* terrainTexture = composites->pin(terrainCell);
         if (!terrainTexture) {
             return false;
         }
         hasCompositeLease = true;
 
-        std::uint64_t textureHash = 0;
         if (!api->dxvk_GetTextureHash ||
             api->dxvk_GetTextureHash(terrainTexture, &textureHash) != REMIXAPI_ERROR_CODE_SUCCESS ||
             textureHash == 0) {
             composites->unpin(terrainCell);
             return false;
         }
-        swprintf_s(
-            textureHashPath.data(), textureHashPath.size(),
-            L"0x%016llX", static_cast<unsigned long long>(textureHash));
-        materialHash = textureHash;
     } else {
-        albedoPath = widenPath(
+        const auto albedoPath = decodePath(
             catalog_.blob.data() + mesh.materialOffset,
             mesh.materialBytes);
         if (albedoPath.empty()) {
             return false;
         }
+
+        auto* staticTexture = static_cast<IDirect3DTexture9*>(
+            const_cast<void*>(dlFindDistantTexture(albedoPath.c_str())));
+        if (!staticTexture) {
+            LOG::logline(
+                "RetainedWorld: static texture name not registered for '%s'; keeping legacy rendering",
+                albedoPath.c_str());
+            return false;
+        }
+        if (!api->dxvk_GetTextureHash) {
+            LOG::logline(
+                "RetainedWorld: texture hash API unavailable for '%s'; keeping legacy rendering",
+                albedoPath.c_str());
+            return false;
+        }
+        const auto hashResult = api->dxvk_GetTextureHash(
+            staticTexture, &textureHash);
+        if (hashResult != REMIXAPI_ERROR_CODE_SUCCESS || textureHash == 0) {
+            LOG::logline(
+                "RetainedWorld: texture hash unavailable for '%s' (error %u); keeping legacy rendering",
+                albedoPath.c_str(),
+                static_cast<unsigned>(hashResult));
+            return false;
+        }
     }
+    swprintf_s(
+        textureHashPath.data(), textureHashPath.size(),
+        L"0x%016llX", static_cast<unsigned long long>(textureHash));
 
     const bool hasAlpha = (mesh.flags & RetainedCatalog::MeshFlagHasAlpha) != 0;
     remixapi_MaterialInfoOpaqueEXT opaque = {};
@@ -1038,13 +1562,19 @@ bool RetainedWorldManager::createMaterial(
     remixapi_MaterialInfo info = {};
     info.sType = REMIXAPI_STRUCT_TYPE_MATERIAL_INFO;
     info.pNext = &opaque;
-    info.hash = materialHash;
-    info.albedoTexture = mesh.category == RetainedCatalog::Category::Terrain
-        ? textureHashPath.data()
-        : albedoPath.c_str();
+    // The API hash is the external material handle. Keep it aligned with the
+    // wrapper's reference-counted material key so distinct alpha/category/cell
+    // materials never destroy one another. Texture replacement matching remains
+    // keyed from the resolved albedo image hash in the Remix submit path.
+    info.hash = materialKey;
+    info.albedoTexture = textureHashPath.data();
     info.filterMode = 1;
-    info.wrapModeU = 1;
-    info.wrapModeV = 1;
+    // Remix sampler values are Clamp=0 and Repeat=1. Terrain composites use the closed
+    // per-cell UV domain above; statics keep their original tiled-repeat behavior.
+    const std::uint8_t wrapMode =
+        mesh.category == RetainedCatalog::Category::Terrain ? 0u : 1u;
+    info.wrapModeU = wrapMode;
+    info.wrapModeV = wrapMode;
 
     if (api->CreateMaterial(&info, &output.handle) != REMIXAPI_ERROR_CODE_SUCCESS ||
         !output.handle) {
@@ -1054,6 +1584,8 @@ bool RetainedWorldManager::createMaterial(
         output = {};
         return false;
     }
+    output.legacyTextureHash =
+        mesh.category == RetainedCatalog::Category::Static ? textureHash : 0;
     output.compositeCache = hasCompositeLease ? composites : nullptr;
     output.compositeCell = terrainCell;
     output.hasCompositeLease = hasCompositeLease;
@@ -1105,6 +1637,26 @@ bool RetainedWorldManager::acquireMesh(
         releaseMaterial(materialKey);
         return false;
     }
+    std::uint64_t replacementHash = 0;
+    if (mesh.category == RetainedCatalog::Category::Static) {
+        LegacyGeometryHash::TriangleList legacyGeometry;
+        const auto* sourceIndices = catalog_.blob.data() + mesh.indexOffset;
+        if (material->second.legacyTextureHash == 0 ||
+            !LegacyGeometryHash::computeTriangleList(
+                vertices.data(), vertices.size() * sizeof(vertices[0]),
+                static_cast<std::uint32_t>(sizeof(vertices[0])), 0,
+                sourceIndices, mesh.indexBytes, mesh.indexStride, 0, mesh.indexCount,
+                legacyGeometry)) {
+            releaseMaterial(materialKey);
+            return false;
+        }
+        replacementHash = legacyGeometry.geometryHash ^ material->second.legacyTextureHash;
+        if (replacementHash == 0) {
+            releaseMaterial(materialKey);
+            return false;
+        }
+    }
+
     const std::uint64_t resourceBytes =
         vertices.size() * sizeof(vertices[0]) + indices.size() * sizeof(indices[0]);
     if (resourceBytes > resourceLimit || resourceBytes_ > resourceLimit - resourceBytes) {
@@ -1119,8 +1671,15 @@ bool RetainedWorldManager::acquireMesh(
     surface.indices_count = indices.size();
     surface.material = material->second.handle;
 
+    remixapi_MeshInfoReplacementEXT replacement = {};
+    if (replacementHash != 0) {
+        replacement.sType = REMIXAPI_STRUCT_TYPE_MESH_INFO_REPLACEMENT_EXT;
+        replacement.replacementHash = replacementHash;
+    }
+
     remixapi_MeshInfo info = {};
     info.sType = REMIXAPI_STRUCT_TYPE_MESH_INFO;
+    info.pNext = replacementHash != 0 ? &replacement : nullptr;
     info.hash = mesh.identity;
     info.surfaces_values = &surface;
     info.surfaces_count = 1;
@@ -1259,111 +1818,24 @@ bool RetainedWorldManager::canCommitCell(
     return true;
 }
 
-bool RetainedWorldManager::calculateTargetResourceBytes(
-    const std::vector<CellKey>& target,
-    std::uint64_t& finalBytes,
-    std::uint64_t& stagingBytes) const {
-    finalBytes = 0;
-    stagingBytes = resourceBytes_;
-    std::unordered_set<std::uint64_t> requiredMeshes;
-    for (const auto key : target) {
-        const auto catalogCell = catalog_.cellByKey.find(key);
-        if (catalogCell == catalog_.cellByKey.end()) {
-            return false;
-        }
-        const auto& cell = catalog_.cells[catalogCell->second];
-        for (std::uint32_t i = 0; i < cell.terrainMeshCount; ++i) {
-            requiredMeshes.insert(catalog_.meshes[cell.terrainMeshFirst + i].identity);
-        }
-        for (std::uint32_t i = 0; i < cell.staticPlacementCount; ++i) {
-            const auto& placement = catalog_.placements[cell.staticPlacementFirst + i];
-            if ((placement.flags & 1u) != 0) {
-                requiredMeshes.insert(placement.prototypeIdentity);
-            }
-        }
-    }
-
-    const auto checkedAdd = [](std::uint64_t& total, std::uint64_t value) {
-        if (total > std::numeric_limits<std::uint64_t>::max() - value) {
-            return false;
-        }
-        total += value;
-        return true;
-    };
-    for (const auto identity : requiredMeshes) {
-        const auto meshIndex = catalog_.meshByIdentity.find(identity);
-        if (meshIndex == catalog_.meshByIdentity.end()) {
-            return false;
-        }
-        const auto& mesh = catalog_.meshes[meshIndex->second];
-        std::uint64_t bytes = 0;
-        if (!checkedAdd(
-                bytes,
-                static_cast<std::uint64_t>(mesh.vertexCount) * sizeof(remixapi_HardcodedVertex)) ||
-            !checkedAdd(
-                bytes,
-                static_cast<std::uint64_t>(mesh.indexCount) * sizeof(std::uint32_t)) ||
-            !checkedAdd(finalBytes, bytes)) {
-            return false;
-        }
-        if (meshResources_.find(identity) == meshResources_.end() &&
-            !checkedAdd(stagingBytes, bytes)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool RetainedWorldManager::targetFitsFinalBudget(
-    const std::vector<CellKey>& target) const {
-    std::uint64_t finalBytes = 0;
-    std::uint64_t stagingBytes = 0;
-    return calculateTargetResourceBytes(target, finalBytes, stagingBytes) &&
-        finalBytes <= kResourceBudgetBytes;
-}
-
-bool RetainedWorldManager::targetFitsCompositeBudget(
-    const std::vector<CellKey>& target,
-    const ResidentCompositeCache& composites) const {
-    std::uint64_t totalBytes = 0;
-    for (const auto key : target) {
-        const auto catalogCell = catalog_.cellByKey.find(key);
-        if (catalogCell == catalog_.cellByKey.end()) {
-            return false;
-        }
-        const auto& cell = catalog_.cells[catalogCell->second];
-        std::uint32_t cellBytes = 0;
-        for (std::uint32_t i = 0; i < cell.terrainMeshCount; ++i) {
-            cellBytes = std::max(
-                cellBytes,
-                catalog_.meshes[cell.terrainMeshFirst + i].materialBytes);
-        }
-        if (totalBytes > std::numeric_limits<std::uint64_t>::max() - cellBytes) {
-            return false;
-        }
-        totalBytes += cellBytes;
-    }
-    return totalBytes <= composites.budgetBytes();
-}
-
-bool RetainedWorldManager::canStageTarget(
-    const std::vector<CellKey>& target,
-    ResidentCompositeCache& composites) const {
-    for (const auto key : target) {
-        if (!canCommitCell(key, composites)) {
-            return false;
-        }
-    }
-
-    std::uint64_t finalBytes = 0;
-    std::uint64_t stagingBytes = 0;
-    return calculateTargetResourceBytes(target, finalBytes, stagingBytes) &&
-        stagingBytes <= kTransitionResourceBudgetBytes;
-}
-
 bool RetainedWorldManager::commitCell(
     CellKey key,
     ResidentCompositeCache& composites) {
+    LARGE_INTEGER performanceFrequency = {};
+    LARGE_INTEGER commitStart = {};
+    QueryPerformanceFrequency(&performanceFrequency);
+    QueryPerformanceCounter(&commitStart);
+    const auto elapsedMicroseconds =
+        [&performanceFrequency](const LARGE_INTEGER& start, const LARGE_INTEGER& end)
+            -> std::uint64_t {
+            if (performanceFrequency.QuadPart <= 0 || end.QuadPart <= start.QuadPart) {
+                return 0;
+            }
+            return static_cast<std::uint64_t>(
+                (end.QuadPart - start.QuadPart) * 1000000ll /
+                performanceFrequency.QuadPart);
+        };
+
     auto runtimeIt = cells_.find(key);
     const auto catalogCell = catalog_.cellByKey.find(key);
     if (runtimeIt == cells_.end() || catalogCell == catalog_.cellByKey.end()) {
@@ -1383,6 +1855,9 @@ bool RetainedWorldManager::commitCell(
         return false;
     }
 
+    LARGE_INTEGER readinessEnd = {};
+    QueryPerformanceCounter(&readinessEnd);
+
     runtime.state = CellState::Loading;
     const auto& cell = catalog_.cells[catalogCell->second];
     std::unordered_set<std::uint64_t> acquired;
@@ -1395,7 +1870,7 @@ bool RetainedWorldManager::commitCell(
         std::uint64_t identity = 0;
         if (!acquireMesh(
                 mesh, cache, terrainCell,
-                kTransitionResourceBudgetBytes, identity)) {
+                settings_.transitionBudgetBytes(), identity)) {
             acquired.erase(mesh.identity);
             return false;
         }
@@ -1413,11 +1888,13 @@ bool RetainedWorldManager::commitCell(
             return false;
         }
     }
+    std::uint32_t enabledStaticPlacements = 0;
     for (std::uint32_t i = 0; i < cell.staticPlacementCount; ++i) {
         const auto& placement = catalog_.placements[cell.staticPlacementFirst + i];
         if ((placement.flags & 1u) == 0) {
             continue;
         }
+        ++enabledStaticPlacements;
         const auto& mesh = catalog_.meshes[catalog_.meshByIdentity.at(placement.prototypeIdentity)];
         if (!acquire(mesh, nullptr, {})) {
             rollbackCell(key);
@@ -1425,6 +1902,9 @@ bool RetainedWorldManager::commitCell(
         }
     }
     runtime.state = CellState::MeshReady;
+
+    LARGE_INTEGER resourcesEnd = {};
+    QueryPerformanceCounter(&resourcesEnd);
 
     auto createInstance = [&](std::uint64_t identity, const remixapi_InstanceInfo& info,
                               std::uint64_t meshIdentity) {
@@ -1488,12 +1968,21 @@ bool RetainedWorldManager::commitCell(
         }
     }
 
+    LARGE_INTEGER instancesEnd = {};
+    QueryPerformanceCounter(&instancesEnd);
+
     runtime.state = CellState::Committed;
     LOG::logline(
-        "RetainedWorld: committed cell (%d,%d), %u meshes, %u instances",
+        "RetainedWorld: committed cell (%d,%d), terrain=%u statics=%u meshes=%u instances=%u, commit_us ready=%llu resources=%llu instances=%llu total=%llu",
         key.x, key.y,
+        static_cast<unsigned>(cell.terrainMeshCount),
+        static_cast<unsigned>(enabledStaticPlacements),
         static_cast<unsigned>(runtime.meshes.size()),
-        static_cast<unsigned>(runtime.instances.size()));
+        static_cast<unsigned>(runtime.instances.size()),
+        static_cast<unsigned long long>(elapsedMicroseconds(commitStart, readinessEnd)),
+        static_cast<unsigned long long>(elapsedMicroseconds(readinessEnd, resourcesEnd)),
+        static_cast<unsigned long long>(elapsedMicroseconds(resourcesEnd, instancesEnd)),
+        static_cast<unsigned long long>(elapsedMicroseconds(commitStart, instancesEnd)));
     return true;
 }
 
@@ -1542,7 +2031,7 @@ bool RetainedWorldManager::rollbackCell(CellKey key) {
 
 bool RetainedWorldManager::evictCell(CellKey key) {
     const auto runtime = cells_.find(key);
-    if (runtime == cells_.end() || runtime->second.state == CellState::Absent) {
+    if (runtime == cells_.end() || !isRetainedCellActive(runtime->second)) {
         return true;
     }
     if (!rollbackCell(key)) {
@@ -1556,71 +2045,55 @@ void RetainedWorldManager::reconcile(
     const D3DXVECTOR4& eye,
     const D3DXMATRIX& view,
     ResidentCompositeCache& composites) {
+    (void)view;
     if (!initialized_ || !deviceReady_ || !catalogActive_ || catalogRefreshRequested_) {
         return;
     }
 
-    releaseUnusedMaterials();
-    const auto target = chooseTargetCells(eye, view);
-    if (target.size() != 2) {
-        teardownCells();
-        composites.setTransitionTargets({});
-        composites.trimToBudget();
-        return;
-    }
-    if (!targetFitsFinalBudget(target)) {
-        LOG::logline("RetainedWorld: target pair exceeds the final mesh resource budget; legacy rendering active");
-        teardownCells();
-        composites.setTransitionTargets({});
-        composites.trimToBudget();
-        return;
-    }
-    if (!targetFitsCompositeBudget(target, composites)) {
-        LOG::logline("RetainedWorld: target pair exceeds the final composite budget; legacy rendering active");
-        teardownCells();
-        composites.setTransitionTargets({});
-        composites.trimToBudget();
-        return;
-    }
-    if (!canStageTarget(target, composites)) {
+    if (!releaseUnusedMaterials()) {
+        LOG::logline(
+            "RetainedWorld: deferred cell commits until unused materials can be released");
         return;
     }
 
-    std::vector<CellKey> newlyCommitted;
+    const auto& target = chooseTargetCells(eye);
+    const std::unordered_set<CellKey, CellKeyHash> desired(target.begin(), target.end());
+    if (countObsoleteCells(cells_, desired) != 0) {
+        return;
+    }
+
+    std::uint32_t committedThisFrame = 0;
     for (const auto key : target) {
-        auto& runtime = cells_.at(key);
-        if (runtime.state == CellState::Committed) {
+        if (committedThisFrame >= settings_.commitsPerFrame) {
+            break;
+        }
+
+        const auto runtime = cells_.find(key);
+        if (runtime == cells_.end() || runtime->second.state == CellState::Committed) {
+            continue;
+        }
+        if (!canCommitCell(key, composites)) {
             continue;
         }
         if (!commitCell(key, composites)) {
-            for (auto rollback = newlyCommitted.rbegin(); rollback != newlyCommitted.rend(); ++rollback) {
-                rollbackCell(*rollback);
-            }
-            return;
+            LOG::logline(
+                "RetainedWorld: deferred remaining cell commits after cell (%d,%d) failed",
+                key.x, key.y);
+            break;
         }
-        newlyCommitted.push_back(key);
+        ++committedThisFrame;
     }
 
-    std::unordered_set<CellKey, CellKeyHash> desired(target.begin(), target.end());
-    std::vector<CellKey> evictions;
-    for (const auto& entry : cells_) {
-        if (entry.second.state != CellState::Absent &&
-            desired.find(entry.first) == desired.end()) {
-            evictions.push_back(entry.first);
-        }
+    if (!releaseUnusedMaterials()) {
+        LOG::logline("RetainedWorld: unused material cleanup remains pending");
     }
-
-    bool evictionSucceeded = true;
-    for (const auto key : evictions) {
-        evictionSucceeded = evictCell(key) && evictionSucceeded;
-    }
-    evictionSucceeded = releaseUnusedMaterials() && evictionSucceeded;
-    composites.setTransitionTargets({});
     composites.trimToBudget();
-    if (evictionSucceeded && resourceBytes_ > kResourceBudgetBytes) {
+
+    if (resourceBytes_ > settings_.transitionBudgetBytes()) {
         LOG::logline(
-            "RetainedWorld: final resource budget invariant violated (%llu bytes)",
-            static_cast<unsigned long long>(resourceBytes_));
+            "RetainedWorld: transition resource budget invariant violated (%llu/%llu bytes)",
+            static_cast<unsigned long long>(resourceBytes_),
+            static_cast<unsigned long long>(settings_.transitionBudgetBytes()));
     }
 }
 
@@ -1672,7 +2145,13 @@ void RetainedWorldManager::afterDeviceReset(
     device_ = resetSucceeded ? device : nullptr;
     deviceReady_ = resetSucceeded && device != nullptr;
     anchorValid_ = false;
-    neighborValid_ = false;
+    targetValid_ = false;
+    admissionDeferred_ = false;
+    targetRadius_ = 0;
+    targetInnerRadius_ = 0;
+    targetCells_.clear();
+    targetResourceBytes_ = 0;
+    targetCompositeBytes_ = 0;
 }
 
 bool RetainedWorldManager::shutdown() {
@@ -1697,6 +2176,7 @@ bool RetainedWorldManager::shutdown() {
     }
 
     initialized_ = false;
+    nextSettingsPollMs_ = 0;
     client_ = nullptr;
     return true;
 }
@@ -1722,8 +2202,9 @@ void setupCamera(
     const D3DXMATRIX& view,
     const D3DXMATRIX& projection,
     float nearPlane,
-    float farPlane) {
-    g_manager.setupCamera(eye, view, projection, nearPlane, farPlane);
+    float farPlane,
+    bool exterior) {
+    g_manager.setupCamera(eye, view, projection, nearPlane, farPlane, exterior);
 }
 
 void prepareCompositeTransition(

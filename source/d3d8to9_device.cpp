@@ -28,11 +28,7 @@ struct VertexShaderInfo
 #include "remix_api_test.h"   // RemixAPITest::getInterface() / isInitialized()
 #include "remix_c.h"          // remixapi_* structs / entrypoints
 #include "world_batch.h"      // worldBatchTier4Enabled() — runtime in-game toggle (MGE Batching MCM)
-#define XXH_INLINE_ALL
-#define XXH_VECTOR 0          // force scalar XXH3 (0=XXH_SCALAR); XXH3 is vectorization-independent
-#pragma optimize("", off)    // MSVC /O2 ICEs inside XXH64; xxhash is not perf-critical here
-#include "xxhash.h"           // replicate Remix's legacy geometry hash (XXH3 + classic XXH64)
-#pragma optimize("", on)
+#include "legacy_geometry_hash.h"
 
 // --- Near-draw static-content tracking (shared infrastructure) ---
 // The Tier 4 batcher classifies a near draw as truly static when its source VB has NOT
@@ -266,84 +262,54 @@ remixapi_MeshHandle worldBatchCreateMesh(remixapi_Interface* remix,
 	const uint32_t indexCount = primCount * 3u;
 	if (indexCount == 0) return nullptr;
 
-	D3DINDEXBUFFER_DESC id = {};
-	ib->GetDesc(&id);
-	const bool idx32 = (id.Format == D3DFMT_INDEX32);
+	D3DINDEXBUFFER_DESC indexDesc = {};
+	D3DVERTEXBUFFER_DESC vertexDesc = {};
+	if (FAILED(ib->GetDesc(&indexDesc)) || FAILED(vb->GetDesc(&vertexDesc))) return nullptr;
+	const uint32_t indexStride = indexDesc.Format == D3DFMT_INDEX32 ? 4u : 2u;
 
 	void* isrc = nullptr;
 	if (FAILED(ib->Lock(0, 0, (BYTE**)&isrc, D3DLOCK_READONLY)) || !isrc) return nullptr;
-	std::vector<uint32_t> raw(indexCount);
-	uint32_t minI = 0xFFFFFFFFu, maxI = 0;
-	if (idx32) {
-		const uint32_t* s = (const uint32_t*)isrc + startIndex;
-		for (uint32_t k = 0; k < indexCount; ++k) { uint32_t v = s[k]; raw[k] = v; if (v < minI) minI = v; if (v > maxI) maxI = v; }
-	} else {
-		const unsigned short* s = (const unsigned short*)isrc + startIndex;
-		for (uint32_t k = 0; k < indexCount; ++k) { uint32_t v = s[k]; raw[k] = v; if (v < minI) minI = v; if (v > maxI) maxI = v; }
-	}
-	ib->Unlock();
-	if (maxI < minI) return nullptr;
-	const uint32_t vertexCount = maxI - minI + 1;
-
-	// Index sub-hash: rebased indices in original width, draw order.
-	uint64_t hIdx;
-	if (idx32) {
-		std::vector<uint32_t> reb(indexCount);
-		for (uint32_t k = 0; k < indexCount; ++k) reb[k] = raw[k] - minI;
-		hIdx = XXH3_64bits(reb.data(), (size_t)indexCount * 4);
-	} else {
-		std::vector<uint16_t> reb(indexCount);
-		for (uint32_t k = 0; k < indexCount; ++k) reb[k] = (uint16_t)(raw[k] - minI);
-		hIdx = XXH3_64bits(reb.data(), (size_t)indexCount * 2);
-	}
-
-	// Descriptor sub-hash (Vulkan enum values: triangle list = 3, index type u16=0 / u32=1).
-	uint64_t hGeo; uint32_t d;
-	d = indexCount;      hGeo = XXH3_64bits_withSeed(&d, 4, 0);
-	d = vertexCount;     hGeo = XXH3_64bits_withSeed(&d, 4, hGeo);
-	d = 3u;              hGeo = XXH3_64bits_withSeed(&d, 4, hGeo);
-	d = idx32 ? 1u : 0u; hGeo = XXH3_64bits_withSeed(&d, 4, hGeo);
-
-	// Decode the used-vertex range and compute the position sub-hash over used vertices.
 	void* vsrc = nullptr;
-	if (FAILED(vb->Lock(0, 0, (BYTE**)&vsrc, D3DLOCK_READONLY)) || !vsrc) return nullptr;
-	const UINT firstVert = (UINT)((INT)minI + baseVertexIndex);
-	const unsigned char* vbase = (const unsigned char*)vsrc + (size_t)firstVert * stride;
+	if (FAILED(vb->Lock(0, 0, (BYTE**)&vsrc, D3DLOCK_READONLY)) || !vsrc) {
+		ib->Unlock();
+		return nullptr;
+	}
 
-	std::vector<remixapi_HardcodedVertex> verts(vertexCount);
-	for (uint32_t i = 0; i < vertexCount; ++i) {
-		const unsigned char* p = vbase + (size_t)i * stride;
+	LegacyGeometryHash::TriangleList legacyGeometry;
+	if (!LegacyGeometryHash::computeTriangleList(
+			vsrc, vertexDesc.Size, stride, baseVertexIndex,
+			isrc, indexDesc.Size, indexStride, startIndex, indexCount,
+			legacyGeometry)) {
+		vb->Unlock();
+		ib->Unlock();
+		return nullptr;
+	}
+
+	const unsigned char* vbase = static_cast<const unsigned char*>(vsrc) +
+		static_cast<size_t>(legacyGeometry.firstVertex) * stride;
+	std::vector<remixapi_HardcodedVertex> verts(legacyGeometry.vertexCount);
+	for (uint32_t i = 0; i < legacyGeometry.vertexCount; ++i) {
+		const unsigned char* p = vbase + static_cast<size_t>(i) * stride;
 		remixapi_HardcodedVertex hv = {};
-		const float* pos = (const float*)(p + 0);
+		const float* pos = reinterpret_cast<const float*>(p);
 		hv.position[0] = pos[0]; hv.position[1] = pos[1]; hv.position[2] = pos[2];
-		const float* nrm = (const float*)(p + normOff);
+		const float* nrm = reinterpret_cast<const float*>(p + normOff);
 		hv.normal[0] = nrm[0]; hv.normal[1] = nrm[1]; hv.normal[2] = nrm[2];
-		hv.color = hasColor ? *(const DWORD*)(p + colorOff) : 0xFFFFFFFFu;
-		const float* uv = (const float*)(p + uvOff);
+		hv.color = hasColor ? *reinterpret_cast<const DWORD*>(p + colorOff) : 0xFFFFFFFFu;
+		const float* uv = reinterpret_cast<const float*>(p + uvOff);
 		hv.texcoord[0] = uv[0]; hv.texcoord[1] = uv[1];
 		verts[i] = hv;
 	}
-	std::vector<uint8_t> used(vertexCount, 0);
-	for (uint32_t k = 0; k < indexCount; ++k) used[raw[k] - minI] = 1;
-	uint64_t hPos = 0;
-	for (uint32_t i = 0; i < vertexCount; ++i)
-		if (used[i]) hPos = XXH3_64bits_withSeed(vbase + (size_t)i * stride, 12, hPos);
 	vb->Unlock();
+	ib->Unlock();
 
-	// Combine (classic XXH64, enum order positions -> indices -> descriptor) then XOR texture hash.
-	uint64_t geoHash = hPos;
-	geoHash = XXH64(&hIdx, 8, geoHash);
-	geoHash = XXH64(&hGeo, 8, geoHash);
-	const uint64_t meshIdentity = geoHash ^ texHash;
-
-	std::vector<uint32_t> idx(indexCount);
-	for (uint32_t k = 0; k < indexCount; ++k) idx[k] = raw[k] - minI;
+	const uint64_t meshIdentity = legacyGeometry.geometryHash ^ texHash;
 
 	remixapi_MeshInfoSurfaceTriangles surf = {};
 	surf.vertices_values   = verts.data();
 	surf.vertices_count    = verts.size();
-	surf.indices_values    = idx.data();
-	surf.indices_count     = idx.size();
+	surf.indices_values    = legacyGeometry.indices.data();
+	surf.indices_count     = legacyGeometry.indices.size();
 	surf.skinning_hasvalue = 0;
 	surf.material          = worldBatchMaterial(remix, tex, texHash, hasAlpha);
 

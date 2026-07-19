@@ -38,8 +38,14 @@ bool         g_initialized = false;
 std::vector<std::string> g_suppress;
 unsigned                 g_suppressGen = 0;
 
-// tex* -> lowercased texture path, filled at distant-static load.
-std::unordered_map<const void*, std::string> g_texNames;
+// tex* -> all lowercased source path aliases seen for that borrowed texture pointer.
+// BSA::loadTexture prefers a DDS substitution, so .tga and .dds requests can resolve
+// to the same COM object. Retaining every alias keeps catalog lookups deterministic.
+std::unordered_map<const void*, std::vector<std::string>> g_texNames;
+
+// Lowercased texture path -> borrowed live IDirect3DTexture9*. This is the reverse lookup
+// retained-world materials need to bind BSA-backed textures through Remix's hash path.
+std::unordered_map<std::string, const void*> g_texturesByName;
 
 // Per-texture suppress verdict cache, tagged with the suppress generation it was built for.
 std::unordered_map<const void*, char> g_suppressedCache;
@@ -126,9 +132,36 @@ const DLCullConfig& dlCullConfig() { poll(); return g_cfg; }
 
 void dlRegisterDistantTexture(const void* texPtr, const char* texName) {
     if (!texPtr || !texName) return;
-    g_texNames[texPtr] = toLower(texName);
+
+    const std::string name = toLower(texName);
+    if (name.empty()) return;
+
+    auto& aliases = g_texNames[texPtr];
+    bool aliasKnown = false;
+    for (const std::string& alias : aliases) {
+        if (alias == name) {
+            aliasKnown = true;
+            break;
+        }
+    }
+    if (!aliasKnown) {
+        aliases.push_back(name);
+    }
+    g_texturesByName[name] = texPtr;
     // A freshly registered texture is not yet in the verdict cache; it will be computed
     // on first query. No generation bump needed (the suppress LIST didn't change).
+}
+
+const void* dlFindDistantTexture(const char* texName) {
+    if (!texName) return nullptr;
+    const auto found = g_texturesByName.find(toLower(texName));
+    return found == g_texturesByName.end() ? nullptr : found->second;
+}
+
+void dlClearDistantTextures() {
+    g_suppressedCache.clear();
+    g_texturesByName.clear();
+    g_texNames.clear();
 }
 
 bool dlIsDistantTextureSuppressed(const void* texPtr) {
@@ -144,9 +177,14 @@ bool dlIsDistantTextureSuppressed(const void* texPtr) {
     char verdict = 0;
     auto nit = g_texNames.find(texPtr);
     if (nit != g_texNames.end()) {
-        const std::string& name = nit->second;
-        for (const std::string& s : g_suppress) {
-            if (!s.empty() && name.find(s) != std::string::npos) { verdict = 1; break; }
+        for (const std::string& name : nit->second) {
+            for (const std::string& s : g_suppress) {
+                if (!s.empty() && name.find(s) != std::string::npos) {
+                    verdict = 1;
+                    break;
+                }
+            }
+            if (verdict != 0) break;
         }
     }
     g_suppressedCache[texPtr] = verdict;

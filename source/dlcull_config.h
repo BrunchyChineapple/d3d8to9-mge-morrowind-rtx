@@ -42,6 +42,14 @@ const DLCullConfig& dlCullConfig();
 // at render time. Safe to call repeatedly. No-op for null.
 void dlRegisterDistantTexture(const void* texPtr, const char* texName);
 
+// Resolve a static_meshes texture name to the live IDirect3DTexture9* loaded through
+// BSA::loadTexture. The returned pointer is borrowed and remains valid until distant-land
+// teardown calls dlClearDistantTextures().
+const void* dlFindDistantTexture(const char* texName);
+
+// Drop all borrowed texture pointers before MGE releases the corresponding COM resources.
+void dlClearDistantTextures();
+
 // True if the distant static using this texture should be skipped (its texture path
 // contains any current `suppress` entry). O(1) after the first lookup per texture; the
 // per-texture verdict is cached and invalidated automatically when the suppress list

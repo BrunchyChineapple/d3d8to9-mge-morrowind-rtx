@@ -26,7 +26,8 @@ namespace RetainedWorld {
         const D3DXMATRIX& view,
         const D3DXMATRIX& projection,
         float nearPlane,
-        float farPlane);
+        float farPlane,
+        bool exterior);
     void prepareCompositeTransition(
         const D3DXVECTOR4& eye,
         const D3DXMATRIX& view,

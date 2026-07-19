@@ -63,7 +63,7 @@
 // Remix Plus ABIs whose struct layout and category bits differ. Bump MINOR on
 // every breaking ABI change.
 #define REMIXAPI_VERSION_MAJOR 0
-#define REMIXAPI_VERSION_MINOR 1001
+#define REMIXAPI_VERSION_MINOR 1002
 #define REMIXAPI_VERSION_PATCH 0
 
 
@@ -139,6 +139,7 @@ extern "C" {
     REMIXAPI_STRUCT_TYPE_INSTANCE_INFO_PARTICLE_SYSTEM_EXT    = 26,
     REMIXAPI_STRUCT_TYPE_INSTANCE_INFO_GPU_INSTANCING_EXT     = 27,
     REMIXAPI_STRUCT_TYPE_CAMERA_MEDIUM_INFO                   = 28,
+    REMIXAPI_STRUCT_TYPE_MESH_INFO_REPLACEMENT_EXT            = 29,
     // NOTE: if adding a new struct, register it in 'rtx_remix_specialization.inl'
     //       and only extend this enum by appending, never adjust the order of these 
     //       as that will break backwards compatibility.
@@ -356,6 +357,13 @@ extern "C" {
     remixapi_MeshInfoSkinning       skinning_value;
     remixapi_MaterialHandle         material;
   } remixapi_MeshInfoSurfaceTriangles;
+
+  typedef struct remixapi_MeshInfoReplacementEXT {
+    remixapi_StructType sType;
+    void*               pNext;
+    // Replacement/capture identity; MeshInfo.hash remains the independently owned resource handle.
+    uint64_t            replacementHash;
+  } remixapi_MeshInfoReplacementEXT;
 
   typedef struct remixapi_MeshInfo {
     remixapi_StructType                      sType;
